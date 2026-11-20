@@ -1,0 +1,1756 @@
+#!/usr/bin/perl
+# AdHoc Relay on this computer, from the console: what its page in LuCI is on a router. As root:
+#   sudo adhoc-relay              in a terminal the menu - Server lines, Fixed ports, Now, Changing IP, Settings, as the tabs of the
+#                                page of a router; in a pipe what happens now
+#   sudo adhoc-relay lines        the lines to copy: for the servers, and for the computers whose IP changes
+#   sudo adhoc-relay help         every command
+# It reads and changes /etc/adhoc-relay.conf - its comments and other lines kept - and loads the settings at once by `systemctl
+# reload adhoc-relay`: the meetings going on go on, the ports given stay with their servers. What happens now it takes from the
+# kernel - the table adhoc_relay of nftables, conntrack - and from what `give` writes into /run/adhoc-relay. Only perl and its own
+# modules, those of perl-base of Debian too.
+
+use strict;
+use warnings;
+use utf8;
+use IO::Socket::INET;
+use IO::Select;
+use Socket qw(inet_aton pack_sockaddr_in);
+
+# :utf8, not :encoding - perl-base of Debian has no Encode
+binmode STDOUT, ':utf8';
+binmode STDERR, ':utf8';
+$| = 1;
+
+my $CONF = $ENV{ADHOC_RELAY_CONF} || '/etc/adhoc-relay.conf';
+my $STATE = '/run/adhoc-relay';
+my $LOAD = qq(. $CONF && /usr/libexec/adhoc-relay/rules load "\$PASSWORD" "\$FIRST" "\$LAST" "\$WAIT" "\$TRIES" "\$BLOCK" "\$GUARD" "\$SHORT" "\$GUESSES" "\$FIXED" "\$RECORDS" "\$USERS" && kill -HUP \$(cat /run/adhoc-relay.pid));
+
+# ── the window: plain in a log or a pipe ──
+
+my $colour = -t STDOUT && !$ENV{NO_COLOR};
+# the colours: of 256 where the terminal has them - nearly every one now -, of 16 else. `bar` is the title of a screen, `chip` a key
+# to press
+my $rich = ($ENV{COLORTERM} // '') =~ /truecolor|24bit/ || ($ENV{TERM} // '') =~ /256|kitty|alacritty|wezterm|foot/;
+my %tone = $rich
+    ? (good => '1;38;5;114', news => '38;5;80', warn => '38;5;214', bad => '1;38;5;203', quiet => '38;5;245', key => '1;38;5;221',
+       name => '1;38;5;255', line => '1;38;5;117', pick => '1;38;5;177', bar => '1;38;5;231;48;5;25', chip => '1;38;5;16;48;5;151',
+       head => '1;38;5;153')
+    : (good => '1;32', news => '36', warn => '33', bad => '1;31', quiet => '90', key => '1;33', name => '1;37', line => '1;36',
+       pick => '1;35', bar => '1;37;44', chip => '30;47', head => '1;36');
+sub paint { my ($text, $t) = @_; $colour && $t && $tone{$t} ? "\e[$tone{$t}m$text\e[0m" : $text }
+# the frames: of lines in a terminal of UTF-8, of - and | in another
+my $utf = ($ENV{LC_ALL} || $ENV{LC_CTYPE} || $ENV{LANG} || '') =~ /utf-?8/i;
+my %BOX = $utf ? (tl => '╭', tr => '╮', bl => '╰', br => '╯', h => '─', v => '│', dot => '●', bar => '▍', arrow => '›')
+    : (tl => '+', tr => '+', bl => '+', br => '+', h => '-', v => '|', dot => '*', bar => '>', arrow => '>');
+# a news, its sign before it: done, a warning, a failure
+my %SIGN = $utf ? (good => '✔ ', warn => '▲ ', bad => '✖ ') : (good => '', warn => '! ', bad => '! ');
+sub note {
+    my ($t, $text) = @_;
+    my $sign = $SIGN{$t} // '';
+    my @parts = wrap($text, width() - 2 - cols($sign));
+    print ' ', paint($sign . shift(@parts), $t), "\n";
+    print ' ', ' ' x cols($sign), paint($_, $t), "\n" for @parts;
+}
+# in the menu, the screens are pages of their own: the title a bar across the window, what it is under it
+my $IN_MENU = 0;
+sub title {
+    my ($text) = @_;
+    my ($name, $about) = $text =~ /^(.*?): (.*)$/ ? ($1, $2) : ($text, undef);
+    my $w = width() - 2;
+    if ($IN_MENU && $colour) { print "\n ", paint("  $name" . ' ' x ($w - 2 - cols($name)), 'bar'), "\n" }
+    else { print "\n ", paint("$BOX{bar} ", 'line'), paint($name, 'name'), "\n" }
+    print '   ', paint($_, 'quiet'), "\n" for defined $about ? wrap(ucfirst $about, $w - 3) : ();
+}
+# a part of a screen: its name, and what it is under it
+sub section {
+    my ($name, $about) = @_;
+    print "\n ", paint("$BOX{bar} ", 'line'), paint($name, 'head'), "\n";
+    print '   ', paint($_, 'quiet'), "\n" for defined $about ? wrap($about, width() - 5) : ();
+}
+# a key to press, as a button: [a] in a pipe
+sub chip { $colour ? paint(" $_[0] ", 'chip') : "[$_[0]]" }
+# the keys of a screen at its bottom: [ key, what it does ], ...
+sub keys_bar { print "\n ", join('   ', map { chip($_->[0]) . ' ' . paint($_->[1], 'quiet') } @_), "\n" }
+# in the menu a failure is said and the menu goes on; a command ends with it
+sub fail { die "$_[0]\n" if $IN_MENU; print STDERR ' ', paint($_[0], 'bad'), "\n"; exit 1 }
+
+# the columns a text takes in a terminal: an emoji two
+sub cols { my $n = length $_[0]; $n++ for $_[0] =~ /[\x{1F300}-\x{1FAFF}]/g; $n }
+
+# the width of the window: 100 at most, 64 at least
+sub width {
+    my $c = $ENV{COLUMNS};
+    ($c) = (`tput cols 2>/dev/null` // '') =~ /(\d+)/ if !$c && -t STDOUT;
+    $c ||= 100;
+    return $c > 100 ? 100 : $c < 64 ? 64 : $c;
+}
+
+# `text` cut into lines of `w` at most, at the spaces
+sub wrap {
+    my ($text, $w) = @_;
+    my (@out, $line);
+    $line = '';
+    for my $word (split / /, $text) {
+        if ($line ne '' && cols($line) + 1 + cols($word) > $w) { push @out, $line; $line = $word }
+        else { $line = $line eq '' ? $word : "$line $word" }
+    }
+    return (@out, $line);
+}
+
+# a frame: its title, then its rows - [ what, the text, its tone ]; a row without a what spans the frame - the texts cut to its width
+sub panel {
+    my ($name, $rows) = @_;
+    my $w = width() - 2;
+    my $lw = 0;
+    for (grep { defined $_->[0] } @$rows) { $lw = length $_->[0] if length $_->[0] > $lw }
+    print ' ', paint("$BOX{tl}$BOX{h} ", 'quiet'), paint($name, 'name'), paint(' ' . $BOX{h} x ($w - length($name) - 5) . $BOX{tr}, 'quiet'), "\n";
+    for my $r (@$rows) {
+        my ($what, $text, $t) = @$r;
+        my $tw = defined $what ? $w - 6 - $lw : $w - 4;
+        my @parts = wrap($text, $tw);
+        for my $i (0 .. $#parts) {
+            my $left = defined $what ? paint(sprintf('%-*s', $lw, $i ? '' : $what), 'quiet') . '  ' : '';
+            my $pad = $tw - cols $parts[$i];
+            print ' ', paint($BOX{v}, 'quiet'), ' ', $left, paint($parts[$i], $t), ' ' x ($pad > 0 ? $pad : 0), ' ', paint($BOX{v}, 'quiet'), "\n";
+        }
+    }
+    print ' ', paint($BOX{bl} . $BOX{h} x ($w - 2) . $BOX{br}, 'quiet'), "\n";
+}
+
+# a line to copy: what it is for, the line - its password or key apart, the rest -, how it is used
+sub show_line {
+    my ($what, $line, $how) = @_;
+    print "\n" if $IN_MENU;
+    print '   ', paint("$BOX{arrow} $what", 'news'), "\n";
+    my ($secret, $rest) = $line =~ /^((?:\x{270F}\x{FE0F}?)?.{16})(\x{1F449}.*|\x{1F310}.*|\x{1F440}.*)$/ ? ($1, $2) : ('', $line);
+    print '     ', paint($secret, 'key'), paint($rest, 'line'), "\n";
+    print '     ', paint($_, 'quiet'), "\n" for $how ? wrap($how, width() - 6) : ();
+}
+
+# a table: the head, the rows, what is said when there is none. The columns as wide as their widest cell
+sub table {
+    my ($head, $rows, $empty) = @_;
+    return print '   ', paint($empty, 'quiet'), "\n" unless @$rows;
+    my @w = map { cols($_) } @$head;
+    for my $r (@$rows) {
+        for my $i (0 .. $#$r) { my $l = cols($r->[$i] // ''); $w[$i] = $l if $l > ($w[$i] // 0) }
+    }
+    my $row = sub { my ($r) = @_; ('   ' . join('   ', map { my $c = $r->[$_] // ''; $c . ' ' x ($w[$_] - cols($c)) } 0 .. $#$r)) =~ s/\s+$//r };
+    my $all = 3 * @w - 3;
+    $all += $_ for @w;
+    print paint($row->($head), 'head'), "\n";
+    print '   ', paint($BOX{h} x $all, 'quiet'), "\n";
+    # the first column stands out: what the row is
+    for my $r (@$rows) {
+        my $text = $row->($r);
+        my $first = $r->[0] // '';
+        $text =~ s/^(   )\Q$first\E/$1 . paint($first, 'name')/e if $first ne '' && $colour;
+        print $text, "\n";
+    }
+}
+
+# seconds in words: "52 s", "9 min 58 s", "3 h 12 min"
+sub span {
+    my ($s) = @_;
+    return '-' unless defined $s;
+    $s = int $s;
+    return "$s s" if $s < 60;
+    return sprintf('%d min %d s', $s / 60, $s % 60) if $s < 3600;
+    return sprintf('%d h %d min', $s / 3600, ($s % 3600) / 60);
+}
+sub ago { defined $_[0] ? span($_[0]) . ' ago' : 'never' }
+
+# ── the settings: /etc/adhoc-relay.conf, its lines as they are ──
+
+my (@text, %conf);
+# the values that are lists, quoted: spaces between their entries
+my %LIST = map { $_ => 1 } qw(FIXED RECORDS REPORTS USERS TAGS);
+# what a value added to the file of an older install says above it
+my %ABOUT = (
+    FIXED => '# fixed ports: port:key[:name], spaces between - each opened by its key alone, the same port at each start',
+    RECORDS => '# the computers whose IP changes, their IP kept here for their servers: name:write key:read key[,read key...]',
+    REPORTS => '# whom this computer notifies of its IP, its IP changing: the line each computer of a fixed IP gave, ✏️write key👀read key👉its address:port',
+    ADDRESS => '# a name or an address of this computer for the lines of the servers; empty: found',
+    USERS => '# users, keys given to others in place of the password, the key of a fixed port, or a read key of a record: of:key:expires:limit[:name[:tags]] - of: password, the port, @record; expires: YYYY-MM-DD, its last day, or -; limit: megabytes its meetings may carry through this computer, or -',
+    TAGS => q(# the names of the tags of users: number:name, spaces between - a tag is a number of 0-255, 8 at most to a user),
+);
+
+sub load {
+    # what `rules load` takes when the file says nothing
+    %conf = (FIRST => 40000, LAST => 49999, WAIT => 60, TRIES => 5, BLOCK => 600, GUARD => 1, SHORT => 20, GUESSES => 5);
+    @text = ();
+    open my $f, '<', $CONF or fail("$CONF: $! - AdHoc Relay is not installed here: sudo sh adhoc-relay-linux.sh");
+    while (my $l = <$f>) {
+        utf8::decode($l);
+        $l =~ s/\r?\n$//;
+        push @text, $l;
+        next unless $l =~ /^\s*([A-Z]+)=(.*?)\s*$/;
+        my ($k, $v) = ($1, $2);
+        $v = $1 if $v =~ /^"(.*)"$/ || $v =~ /^'(.*)'$/;
+        $conf{$k} = $v;
+    }
+    close $f;
+}
+
+# a value set in its line, or in a line added at the end
+sub set {
+    my ($k, $v) = @_;
+    my $line = $LIST{$k} ? qq($k="$v") : "$k=$v";
+    my $done;
+    for (@text) {
+        next unless /^\s*$k=/;
+        $_ = $line;
+        $done = 1;
+        last;
+    }
+    push @text, ($ABOUT{$k} // ()), $line unless $done;
+    $conf{$k} = $v;
+}
+
+# the file written anew beside, then put in place: for root alone, it has the password
+sub save {
+    my $new = "$CONF.new";
+    open my $f, '>:utf8', $new or fail("$new: $!");
+    chmod 0600, $new;
+    print $f "$_\n" for @text;
+    close $f or fail("$new: $!");
+    rename $new, $CONF or fail("$CONF: $!");
+}
+
+sub systemd { -d '/run/systemd/system' && grep { -x "$_/systemctl" } split /:/, ($ENV{PATH} // '') }
+
+# the settings saved and loaded: a reload, not a restart - the stop of a restart would take the rules away from the meetings
+sub apply {
+    save();
+    if (!systemd()) {
+        note('warn', 'Saved. No systemd here: load them with');
+        print "   $LOAD\n";
+    } elsif (system('systemctl', 'is-active', '--quiet', 'adhoc-relay') == 0) {
+        system('systemctl', 'reload', 'adhoc-relay') == 0
+            ? note('good', 'Saved and loaded: the meetings going on go on')
+            : note('bad', 'Saved, not loaded: systemctl reload adhoc-relay failed - see systemctl status adhoc-relay');
+    } elsif (system('systemctl', 'is-failed', '--quiet', 'adhoc-relay') == 0) {
+        system('systemctl', 'restart', 'adhoc-relay') == 0
+            ? note('good', 'Saved, and AdHoc Relay started again')
+            : note('bad', 'Saved; AdHoc Relay does not start - see systemctl status adhoc-relay');
+    } else {
+        note('warn', 'Saved. AdHoc Relay is not running: systemctl start adhoc-relay');
+    }
+}
+
+# the entries of a list as they are written: those not understood stay as they are, and are told
+sub entries { split ' ', $conf{$_[0]} // '' }
+
+sub fixed {
+    map { /^(\d+):([A-Za-z0-9]{16})(?::([A-Za-z0-9_-]+))?$/ ? { raw => $_, port => $1, key => $2, name => $3 } : () } entries('FIXED');
+}
+sub records {
+    map { /^([A-Za-z0-9_-]+):([A-Za-z0-9]{16}):([A-Za-z0-9,]*)$/
+        ? { raw => $_, name => $1, write => $2, reads => [grep { /^[A-Za-z0-9]{16}$/ } split /,/, $3] } : () } entries('RECORDS');
+}
+# the users: of:key:expires:limit[:name[:tags]] - of: password, a fixed port, @record; expires '' - never; limit 0 - none, direct -
+# the direct path only, nothing through this computer; tags: up to 8 numbers of 0-255, dots between
+sub users {
+    my @all;
+    for (entries('USERS')) {
+        next unless /^(password|\d+|@[A-Za-z0-9_-]+):([A-Za-z0-9]{16}):(\d{4}-\d\d-\d\d|-):(\d+|-|direct)(?::([A-Za-z0-9_-]*)(?::(\d{1,3}(?:\.\d{1,3}){0,7}))?)?$/;
+        my %a = (raw => $_, of => $1, key => $2, expires => $3 eq '-' ? '' : $3, limit => $4 eq '-' || $4 eq 'direct' ? 0 : $4 + 0, direct => $4 eq 'direct' ? 1 : 0, name => $5 // '',
+            tags => [map { $_ + 0 } split /\./, $6 // '']);
+        push @all, \%a unless grep { $_ > 255 } @{$a{tags}};
+    }
+    return @all;
+}
+sub user_entry {
+    my ($a) = @_;
+    my @tags = uniq_tags(@{$a->{tags} // []});
+    return "$a->{of}:$a->{key}:" . ($a->{expires} || '-') . ':' . ($a->{direct} ? 'direct' : $a->{limit} || '-')
+        . (($a->{name} // '') ne '' || @tags ? ':' . ($a->{name} // '') : '') . (@tags ? ':' . join('.', @tags) : '');
+}
+sub uniq_tags { my %s; grep { !$s{$_}++ } sort { $a <=> $b } map { $_ + 0 } @_ }
+
+# The tags of a user as one number of 8 bytes, a tag each: sorted, the last repeated to fill the 8; -1 - none. A selection
+# compares bytes, nothing else
+sub packed {
+    my @t = uniq_tags(@_);
+    return -1 unless @t;
+    my $n = 0;
+    $n = ($n << 8) | $t[$_ < @t ? $_ : $#t] for 0 .. 7;
+    return $n;
+}
+sub has_tag { my ($n, $tag) = @_; return 0 if $n == -1; for (my $i = 0; $i < 64; $i += 8) { return 1 if (($n >> $i) & 255) == $tag } 0 }
+# the names of the tags: TAGS="id:name ..."
+sub tags { map { /^(\d{1,3}):([A-Za-z0-9_-]+)$/ && $1 <= 255 ? { raw => $_, id => $1 + 0, name => $2 } : () } entries('TAGS') }
+# tags given by numbers or names, commas between: their numbers; a name not known fails
+sub tag_ids {
+    my %id = map { $_->{name} => $_->{id} } tags();
+    map { /^\d+$/ && $_ <= 255 ? $_ + 0 : defined $id{$_} ? $id{$_} : fail("No tag $_: a number of 0-255, or a name of adhoc-relay tag") }
+        grep { $_ ne '' } split /,/, join ',', @_;
+}
+# the users that have each of the tags - or with $any one of them
+sub users_with {
+    my ($any, @want) = @_;
+    return users() unless @want;
+    grep { my $n = packed(@{$_->{tags}}); $any ? grep { has_tag($n, $_) } @want : !grep { !has_tag($n, $_) } @want } users();
+}
+# what each user of a port carried, in kilobytes, from its quota or counter a_<key> of the table: key -> kilobytes, limit in MB
+sub counted {
+    my (%kb, %limit);
+    my %unit = (bytes => 1, kbytes => 1024, mbytes => 1048576, gbytes => 1073741824);
+    my $table = `nft list table ip adhoc_relay 2>/dev/null`;
+    while ($table =~ /(?:quota|counter) a_([A-Za-z0-9]{16}) \{\s*([^}]*)\}/g) {
+        my ($k, $body) = ($1, $2);
+        my $b = $body =~ /used (\d+) (\w+)/ ? $1 * ($unit{$2} // 1) : $body =~ /bytes (\d+)/ ? $1 : 0;
+        $kb{$k} = int($b / 1024);
+        $limit{$k} = int($1 * ($unit{$2} // 1) / 1048576) if $body =~ /over (\d+) (\w+)/;
+    }
+    return (\%kb, \%limit);
+}
+# A line with the signs of the keyboard: 👉 >, 👀 ?, ✏️ ! - what makes an emoji coloured, or the colour of skin, left out; and as
+# people see it
+sub plain {
+    my ($t) = @_;
+    utf8::decode($t) unless utf8::is_utf8($t);
+    $t =~ s/[\x{FE0F}\x{1F3FB}-\x{1F3FF}]//g;
+    $t =~ tr/\x{1F449}\x{1F310}\x{1F440}\x{270F}/>@?!/;
+    return $t =~ s/^\s+|\s+$//gr;
+}
+sub pretty { (my $t = $_[0]) =~ tr/>@?/\x{1F449}\x{1F310}\x{1F440}/; $t =~ s/!/\x{270F}\x{FE0F}/g; $t }
+# the line a relay of fixed address gives: ✏️<write key>[👀<read key>]👉<it>:<port>
+sub report_of {
+    plain($_[0]) =~ /^!([A-Za-z0-9]{16})(?:\?([A-Za-z0-9]{16}))?>([^\s:@=,!?>]+):(\d+)$/ && $4 >= 1 && $4 <= 65535
+        ? { write => $1, read => $2, host => $3, at => $4 } : undef;
+}
+sub reports { map { my $r = report_of($_); $r ? { %$r, raw => $_ } : () } entries('REPORTS') }
+
+# the entries not understood, told once
+sub odd {
+    my %ok = map { $_->{raw} => 1 } fixed(), records(), reports(), users(), tags();
+    for my $k (qw(FIXED RECORDS REPORTS USERS TAGS)) {
+        note('warn', "$k in $CONF: not understood, left as it is: $_") for grep { !$ok{$_} } entries($k);
+    }
+}
+
+# the keys of this computer: each is one of a kind
+sub keys_used { ($conf{PASSWORD} // ()), (map { $_->{key} } fixed(), users()), (map { ($_->{write}, @{$_->{reads}}) } records()) }
+
+sub random_bytes {
+    my ($n) = @_;
+    my $b = '';
+    if (open my $r, '<:raw', '/dev/urandom') { read $r, $b, $n; close $r }
+    $b = join '', map { chr int rand 256 } 1 .. $n if length $b != $n;
+    return $b;
+}
+
+# 16 letters and digits - the password and every key -, those that are not mistaken for one another when read aloud or typed; none used here, nor in `also`
+sub new_key {
+    my %used = map { $_ => 1 } keys_used(), @_;
+    my $abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    while (1) {
+        my $k = join '', map { substr($abc, ord($_) % length $abc, 1) } split //, random_bytes(16);
+        return $k unless $used{$k};
+    }
+}
+
+# ── what `give` writes: the records it keeps, the reports it sends ──
+
+sub state_lines {
+    my ($file) = @_;
+    open my $f, '<', "$STATE/$file" or return ();
+    my @l = map { [split ' '] } <$f>;
+    close $f;
+    return grep { @$_ } @l;
+}
+# name -> [ address, unix time of the last write ]
+sub kept_records { map { ($_->[0] => [@$_[1 .. 2]]) } state_lines('records') }
+# "host:port" -> { sent, answered, seen }
+sub sent_reports { map { ($_->[0] => { sent => $_->[1], answered => $_->[2], seen => $_->[3] }) } state_lines('reports') }
+sub report_state { my ($r, $sent) = @_; $sent->{"$r->{host}:$r->{at}"} }
+
+# ── the address of this computer for the lines ──
+
+sub public {
+    my @b = split /\./, $_[0] // '';
+    return 0 unless @b == 4;
+    return !($b[0] == 0 || $b[0] == 10 || $b[0] == 127 || $b[0] >= 224 || ($b[0] == 169 && $b[1] == 254) || ($b[0] == 192 && $b[1] == 168)
+        || ($b[0] == 172 && $b[1] >= 16 && $b[1] <= 31) || ($b[0] == 100 && $b[1] >= 64 && $b[1] <= 127));
+}
+
+# The address the internet sees this computer at: one STUN Binding request ( RFC 5389 ) to each public server, from one socket;
+# the first answer is taken, undef when none answers in 2 seconds. As public.uc of the router
+sub stun {
+    my @servers = ('stun.miwifi.com:3478', 'stun.chat.bilibili.com:3478', 'stun.qq.com:3478', 'stun.l.google.com:19302',
+        'stun.cloudflare.com:3478', 'global.stun.twilio.com:3478', 'stun.nextcloud.com:3478', 'stun.sipgate.net:3478');
+    my $cookie = "\x21\x12\xa4\x42";
+    my $id = random_bytes(12);
+    my $udp = IO::Socket::INET->new(Proto => 'udp') or return;
+    my $sel = IO::Select->new($udp);
+    # the address of the answer to this request: XOR-MAPPED-ADDRESS, its bytes xor the cookie, or MAPPED-ADDRESS
+    my $address = sub {
+        my ($a) = @_;
+        return if length $a < 20 || substr($a, 0, 2) ne "\x01\x01" || substr($a, 4, 16) ne $cookie . $id;
+        my $plain;
+        for (my $at = 20; $at + 4 <= length $a;) {
+            my ($type, $size) = unpack 'nn', substr($a, $at, 4);
+            if (($type == 0x0020 || $type == 0x0001) && $size >= 8 && $at + 12 <= length $a && ord(substr($a, $at + 5, 1)) == 1) {
+                my @b = unpack 'C4', substr($a, $at + 8, 4);
+                if ($type == 0x0020) {
+                    my @c = unpack 'C4', $cookie;
+                    return join '.', map { $b[$_] ^ $c[$_] } 0 .. 3;
+                }
+                $plain = join '.', @b;
+            }
+            $at += 4 + (($size + 3) & ~3);
+        }
+        return $plain;
+    };
+    my $take = sub {
+        my ($wait) = @_;
+        while ($sel->can_read($wait)) {
+            my $answer = '';
+            recv($udp, $answer, 512, 0);
+            my $found = $address->($answer);
+            return $found if $found;
+            $wait = 0;
+        }
+        return;
+    };
+    # the names are looked up one by one: an answer that came meanwhile ends it at once
+    for (@servers) {
+        my ($host, $port) = split /:/;
+        my $ip = inet_aton($host);
+        send($udp, "\x00\x01\x00\x00" . $cookie . $id, 0, pack_sockaddr_in($port, $ip)) if $ip;
+        my $found = $take->(0);
+        return $found if $found;
+    }
+    my $until = time + 2;
+    while ((my $left = $until - time) > 0) {
+        my $found = $take->($left);
+        return $found if $found;
+    }
+    return;
+}
+
+# the address for the lines, and where it comes from: set; as a relay of fixed address saw it, at the last answer to the
+# report of this computer; of the default route, when public; as STUN finds it. Looked for once
+my @address;
+sub address {
+    return @address if @address;
+    return @address = ($conf{ADDRESS}, 'set by hand') if ($conf{ADDRESS} // '') ne '';
+    my $sent = { sent_reports() };
+    my ($seen, $when, $by);
+    for my $r (reports()) {
+        my $s = report_state($r, $sent) or next;
+        next unless $s->{answered} && public($s->{seen}) && (!$when || $s->{answered} > $when);
+        ($seen, $when, $by) = ($s->{seen}, $s->{answered}, $r->{host});
+    }
+    return @address = ($seen, "as $by saw it " . ago(time - $when)) if $seen;
+    my $udp = IO::Socket::INET->new(Proto => 'udp', PeerAddr => '1.1.1.1', PeerPort => 53);
+    my $local = $udp ? $udp->sockhost : undef;
+    return @address = ($local, 'found automatically') if public($local);
+    my $found = stun();
+    return @address = ($found, 'found automatically') if $found;
+    return @address = (undef, 'not found');
+}
+
+# ── the lines ──
+
+# The line of a server for a port: `ask` - the password, a port given at each start, the port the first: 👉 at the end, an answer
+# comes; else the key of a fixed port, knocked at once. The address of this computer looked up at the relays of fixed address
+# it reports it to, with a read key - every port of this computer alike: the port is of the line; direct else. The keys as dots
+# when `hide`
+sub server_line {
+    my ($ask, $secret, $port, $hide) = @_;
+    my $k = sub { $hide ? ($utf ? "\x{2022}" : '*') x 16 : $_[0] };
+    my $end = $ask ? "\x{1F449}" : '';
+    my @reads = map { $k->($_->{read}) . "\x{1F449}$_->{host}:$_->{at}" } grep { defined $_->{read} } reports();
+    return $k->($secret) . "\x{1F310}" . join("\x{1F310}", @reads) . "\x{1F310}$port$end" if @reads;
+    my ($ip) = address();
+    return $k->($secret) . "\x{1F449}" . ($ip // '<address>') . ":$port$end";
+}
+
+# a line that looks the address up at the relays of fixed address: 🌐 before each, and before the port
+sub read_form { $_[0] =~ /\x{1F310}/ }
+
+# what each line is: [ its title, the line, the address its client connects to or undef ]
+sub server_lines {
+    my ($hide) = @_;
+    my @l;
+    if (($conf{PASSWORD} // '') =~ /^[A-Za-z0-9]{16}$/) {
+        push @l, ['Any free port: a new one at every start', server_line(1, $conf{PASSWORD}, $conf{FIRST}, $hide), undef];
+    }
+    for my $f (sort { $a->{port} <=> $b->{port} } fixed()) {
+        my $line = server_line(0, $f->{key}, $f->{port}, $hide);
+        my ($ip) = address();
+        push @l, ["Fixed port $f->{port}" . ($f->{name} ? " \x{B7} $f->{name}" : ''), $line, read_form($line) ? undef : ($ip // '<address>') . ":$f->{port}"];
+    }
+    return @l;
+}
+
+# what the clients of a line do, in words
+sub how {
+    my ($line, $client) = @_;
+    return 'The IP of this computer changes: the server looks it up at ' . join(', ', map { $_->{host} } grep { defined $_->{read} } reports())
+        . ' and tells its clients.' if read_form($line);
+    return "Clients connect to $client - always the same." if $client;
+    my ($ip) = address();
+    return 'The server tells its clients where to connect: a new port at every start, such as ' . ($ip // '<address>') . ':' . ($conf{FIRST} + 1933) . '.';
+}
+
+# the line a relay of a changing address reports by: ✏️<write key>👀<read key>👉<this computer>:<first>
+sub record_line {
+    my ($r, $read) = @_;
+    my ($ip) = address();
+    return "\x{270F}\x{FE0F}$r->{write}\x{1F440}" . ($read // $r->{reads}[0] // '') . "\x{1F449}" . ($ip // '<address>') . ":$conf{FIRST}";
+}
+
+# the password, when it is not of 16 characters: servers get nothing with it, said plainly
+sub password_note {
+    my $p = $conf{PASSWORD} // '';
+    return if $p =~ /^[A-Za-z0-9]{16}$/;
+    my $how = $IN_MENU ? 'Settings, 1' : 'adhoc-relay password new';
+    note('bad', $p eq '' ? "No password: servers cannot ask for a port. Create one: $how"
+        : "The password is not of 16 letters and digits: servers cannot ask for a port with it. A new one: $how");
+}
+
+sub address_note {
+    my ($a, $from) = address();
+    print "\n" if $IN_MENU;
+    my $how = $IN_MENU ? 'Settings, 2' : 'adhoc-relay address <name or IP>';
+    if (!defined $a) { note('warn', "The public IP of this computer is not found. Set a DNS name or the IP: $how") }
+    # the address of a computer that reports its IP changes: a direct line breaks with it
+    elsif ($from =~ /saw it/) {
+        note('warn', "The public IP of this computer, $a, changes: a line with it stops working then. The line pasted in Changing IP has no read key - ask the owner of that relay for its line again");
+    }
+    else { note('quiet', "The public IP in the lines: $a, $from. Another: $how") }
+}
+
+# ── the kernel: the table adhoc_relay, conntrack ──
+
+sub secs {
+    my ($t) = @_;
+    my $all = 0;
+    my %unit = (d => 86400, h => 3600, m => 60, s => 1);
+    while ($t =~ s/^(\d+)(ms|d|h|m|s)//) { $all += $1 * $unit{$2} unless $2 eq 'ms' }
+    return $all;
+}
+
+# the elements of each set, as nft lists them: name -> [ { key => [ its parts ], left => seconds or undef } ]
+sub sets {
+    my ($table) = @_;
+    my (%sets, $name, $on, $all);
+    $name = '';
+    for my $l (split /\n/, $table) {
+        $name = $1 eq 'set' ? $2 : '' if $l =~ /^\s*(set|map|chain)\s+(\S+)/;
+        if ($l =~ s/.*elements = \{//) { $on = 1; $all = '' }
+        next unless $on;
+        $all .= " $l";
+        next if index($l, '}') < 0;
+        $on = 0;
+        $all =~ s/\}.*//s;
+        next unless $name;
+        for my $it (split /,/, $all) {
+            my @w = split ' ', $it;
+            my (@key, $left);
+            for (my $i = 0; $i < @w; $i++) {
+                if ($w[$i] eq 'expires') { $left = secs($w[$i + 1] // ''); last }
+                if ($w[$i] eq 'timeout') { $i++; next }
+                push @key, $w[$i] unless $w[$i] eq '.' || $w[$i] eq ':';
+            }
+            push @{$sets{$name}}, { key => \@key, left => $left } if @key;
+        }
+    }
+    return \%sets;
+}
+
+# the state of a connection, as conntrack names it, in words
+sub conn_state { $_[0] eq 'ESTABLISHED' ? 'Connected' : $_[0] =~ /^SYN/ ? 'Connecting' : 'Closing' }
+
+# the connections of the mark of AdHoc Relay: the original direction is the client to the relay, the reply comes from
+# the server. Each: the port, the client, the server, the state - the bytes after it when the kernel counts them
+# the names of the users of ports by their numbers, as `rules load` wrote them: a meeting of one carries its number in its mark,
+# bits 16-23
+sub user_names {
+    my %n;
+    open my $f, '<', '/run/adhoc-relay/users' or return %n;
+    while (<$f>) { my ($id, $key, $name) = split; $n{$id} = $name ne '-' ? $name : $key if defined $name }
+    close $f;
+    return %n;
+}
+
+sub meetings {
+    open my $f, '<', '/proc/net/nf_conntrack' or return ();
+    my %names = user_names();
+    my @m;
+    while (<$f>) {
+        next unless / tcp / && /mark=(\d+)/ && ($1 & 0x08000000);
+        # the client is of the way there - or, met the other way round ( 0x02000000 ), of the way back
+        my ($mark, $user) = ($1, $names{($1 >> 16) & 255});
+        my @w = split;
+        my (@src, @sport, @dport, $bytes);
+        for (@w) {
+            my ($k, $v) = split /=/, $_, 2;
+            next unless defined $v;
+            push @src, $v if $k eq 'src';
+            push @sport, $v if $k eq 'sport';
+            push @dport, $v if $k eq 'dport';
+            $bytes += $v if $k eq 'bytes';
+        }
+        my ($c, $v) = $mark & 0x02000000 ? (1, 0) : (0, 1);
+        push @m, [$dport[0], "$src[$c]:$sport[$c]", "$src[$v]:$sport[$v]", conn_state($w[5]) . (defined $bytes ? " \x{B7} " . bytes_text($bytes) : '')
+            . (defined $user ? " \x{B7} user $user" : '')];
+    }
+    close $f;
+    return @m;
+}
+
+sub bytes_text {
+    my ($n) = @_;
+    my @u = ('B', 'KB', 'MB', 'GB', 'TB');
+    my $i = 0;
+    while ($n >= 1024 && $i < $#u) { $n /= 1024; $i++ }
+    return ($i ? sprintf('%.1f', $n) : $n) . " $u[$i]";
+}
+
+sub giving {
+    for (glob '/proc/[0-9]*/cmdline') {
+        open my $f, '<', $_ or next;
+        local $/;
+        my $c = <$f> // '';
+        return 1 if $c =~ m{adhoc-relay/give\.pl};
+    }
+    return 0;
+}
+
+# what a try of the last 10 minutes was, in words: as on the page of a router
+my %TRIED = (
+    request => 'Asked for a port',
+    knock => 'Knock by the server of the port',
+    stranger => 'Knock at a port held by another server',
+    wrong => 'Wrong password or key',
+    blocked => 'Ignored: a blocked address',
+    guessing => 'Ignored: it guessed passwords at this port',
+    'dial-a' => 'The server of the port dialed in',
+    dial => 'Connection from a client, or a stranger',
+    wrote => 'Reported its IP',
+    read => 'A server looked up an IP',
+    call => 'A client called the server, to meet it directly',
+);
+
+# " (3)": how many, after the name of a part; nothing for none
+sub count { @_ ? ' (' . @_ . ')' : '' }
+
+# ── the commands ──
+
+# what happens now: the connections, the ports held, the blocked addresses, the last 10 minutes
+sub status {
+    my $table = `nft list table ip adhoc_relay 2>/dev/null`;
+    if ($? != 0) {
+        print "\n";
+        note('bad', 'AdHoc Relay is not running: its rules are not in the kernel');
+        note('warn', systemd() ? 'Start it: systemctl start adhoc-relay; why it stopped: systemctl status adhoc-relay' : "Start it: $LOAD");
+        return;
+    }
+    my $s = sets($table);
+    my $set = sub { @{$s->{$_[0]} // []} };
+    unless (giving()) {
+        print "\n";
+        note('bad', 'give, which gives the ports, has stopped: servers cannot ask for a port. systemctl restart adhoc-relay');
+    }
+
+    my %name = map { $_->{port} => $_->{name} } fixed();
+    my %owner = map { $_->{key}[0] => $_->{key}[1] } $set->('holder');
+    my %holds = map { ("$_->{key}[0] $_->{key}[1]" => 1) } $set->('holder');
+    my %open = map { $_->{key}[0] => 1 } $set->('open');
+    my %dials;
+    for ($set->('seen')) { $dials{$_->{key}[0]} //= "$_->{key}[1]:$_->{key}[2]" }
+
+    my @m = meetings();
+    section('Connections' . count(@m));
+    table(['Port', 'Client', 'Server', 'State'], \@m, 'No connections now');
+
+    my @ports = map {
+        my $p = $_->{key}[0];
+        my $now = !$open{$p} ? "Closed \x{B7} held for its server" : $dials{$p} ? "Open \x{B7} the server is waiting for a client, from $dials{$p}" : "Open \x{B7} the server has not dialed in yet";
+        [$p . (exists $name{$p} ? " \x{B7} fixed" . ($name{$p} ? ", $name{$p}" : '') : ''), $owner{$p} // '-', $now, span($_->{left})];
+    } sort { $a->{key}[0] <=> $b->{key}[0] } $set->('given');
+    section('Ports held by servers' . count(@ports), @ports ? 'A port is open while its server waits for a client, and closed while it holds the port for a while longer' : undef);
+    table(['Port', 'Server', 'State', 'Held for'], \@ports, 'No server holds a port now');
+
+    if (users()) {
+        section('Users' . count(users()), 'Keys given to others: the traffic of their meetings, and its limit');
+        user_list();
+    }
+
+    my @blocked = ((map { [$_->{key}[0], 'Wrong passwords or keys: blocked at every port', span($_->{left})] } $set->('blocked')),
+        (map { [$_->{key}[0], "Guessed passwords at port $_->{key}[1]: blocked at that port only", span($_->{left})] } $set->('guessing')));
+    section('Blocked addresses' . count(@blocked), @blocked ? 'Too many wrong passwords or keys block an address at every port; too many short connections to one port - password guessing - block it at that port' : undef);
+    table(['Address', 'Why', 'Blocked for'], \@blocked, 'No address is blocked');
+
+    my %blocked = map { $_->{key}[0] => 1 } $set->('blocked');
+    my %guessing = map { ("$_->{key}[0] $_->{key}[1]" => 1) } $set->('guessing');
+    my @tries;
+    for my $kind (qw(t_asked t_knocked t_refused t_dialed t_wrote t_read t_called)) {
+        for ($set->($kind)) {
+            my ($addr, $sport, $port) = @{$_->{key}};
+            my $what = $kind eq 't_asked' ? 'request' : $kind eq 't_wrote' ? 'wrote' : $kind eq 't_read' ? 'read' : $kind eq 't_called' ? 'call'
+                : $kind eq 't_knocked' ? ($holds{"$port $addr"} ? 'knock' : 'stranger')
+                : $kind eq 't_refused' ? ($blocked{$addr} ? 'blocked' : 'wrong')
+                : $holds{"$port $addr"} ? 'dial-a' : $guessing{"$addr $port"} ? 'guessing' : 'dial';
+            push @tries, [600 - ($_->{left} // 600), "$addr:$sport", $port, $TRIED{$what}];
+        }
+    }
+    @tries = sort { $a->[0] <=> $b->[0] } @tries;
+    section('The last 10 minutes' . (@tries > 30 ? ': the newest 30 of ' . @tries : ''),
+        @tries ? 'Requests for a port, knocks, connections to the ports held, IPs reported and looked up. Scans of the internet at ports nobody holds are left out' : undef);
+    table(['When', 'From', 'Port', 'What'], [map { [ago($_->[0]), @$_[1 .. 3]] } grep { defined } @tries[0 .. (@tries > 30 ? 29 : $#tries)]],
+        'Nothing in the last 10 minutes');
+    odd();
+}
+
+sub lines {
+    my @l = server_lines(0);
+    title('Server lines: A line is all a server needs to be reached through this computer: copy it into adhoc-relay-server, or any program that works with AdHoc Relay. It holds the password or a key: give it only to the owner of that server.');
+    password_note();
+    show_line($_->[0], $_->[1], how($_->[1], $_->[2])) for @l;
+    address_note() if grep { !read_form($_->[1]) } @l;
+    if (my @r = records()) {
+        section('Lines for the computers whose IP this one keeps', 'Each is pasted on its computer: adhoc-relay report add <line> there, or Changing IP > On my public IP change, notify the following relays of its page');
+        show_line($_->{name}, record_line($_), '') for @r;
+    }
+    odd();
+}
+
+sub password {
+    my ($what) = @_;
+    if (!defined $what) {
+        print ' ', paint($conf{PASSWORD} // '', 'key'), "\n";
+        return;
+    }
+    fail('adhoc-relay password [new]') unless $what eq 'new';
+    my $p = new_key();
+    set('PASSWORD', $p);
+    apply();
+    print ' The new password: ', paint($p, 'key'), "\n";
+    note('warn', "Give every server its new line now: one that asks with the old password blocks its own address after $conf{TRIES} tries") if $conf{TRIES};
+    lines();
+}
+
+# the fixed ports, in a table: their keys hidden
+sub fixed_list {
+    my ($ip) = address();
+    table(['Port', 'Name', 'Clients connect to'], [map {
+            my $line = server_line(0, $_->{key}, $_->{port}, 1);
+            [$_->{port}, $_->{name} // '-', read_form($line) ? 'where the server tells them: the IP changes' : ($ip // '<address>') . ":$_->{port}"]
+        } sort { $a->{port} <=> $b->{port} } fixed()],
+        $IN_MENU ? 'None yet: a - add one' : 'None yet: adhoc-relay fixed add [<port> [<name>]]');
+    note('quiet', 'Their lines, with the keys: ' . ($IN_MENU ? 'Server lines, 1 of the menu' : 'adhoc-relay lines')) if fixed();
+}
+
+sub fixed_cmd {
+    my ($what, $port, $name) = @_;
+    if (!defined $what) {
+        title('Fixed ports: A fixed port belongs to one server: the server opens it with its own key, and its clients always connect to the same address and port - set it once in Remote Desktop Connection or ssh.');
+        fixed_list();
+        odd();
+        return;
+    }
+    if ($what eq 'add') {
+        $port = free_port() unless defined $port && $port ne '';
+        $name = undef if defined $name && $name eq '';
+        fail("adhoc-relay fixed add [<port> [<name>]]: a port of " . ($conf{FIRST} + 1) . "-$conf{LAST}") unless $port =~ /^\d+$/;
+        fail("Port $port is not of the range: a port of " . ($conf{FIRST} + 1) . "-$conf{LAST}") unless $port > $conf{FIRST} && $port <= $conf{LAST};
+        fail("Port $port is fixed already") if grep { $_->{port} == $port } fixed();
+        fail('A name is letters, digits, - and _') if defined $name && $name !~ /^[A-Za-z0-9_-]+$/;
+        my $key = new_key();
+        set('FIXED', join ' ', entries('FIXED'), "$port:$key" . (defined $name ? ":$name" : ''));
+        apply();
+        fixed_line($port, $key, $name);
+        return;
+    }
+    fail("adhoc-relay fixed $what <port>") unless defined $port && $port =~ /^\d+$/;
+    my ($f) = grep { $_->{port} == $port } fixed();
+    fail("No fixed port $port") unless $f;
+    if ($what eq 'key') {
+        my $key = new_key();
+        set('FIXED', join ' ', map { $_ eq $f->{raw} ? "$port:$key" . (defined $f->{name} ? ":$f->{name}" : '') : $_ } entries('FIXED'));
+        apply();
+        note('warn', 'The old key opens nothing now: give the server its new line');
+        fixed_line($port, $key, $f->{name});
+        return;
+    }
+    if ($what eq 'del') {
+        set('FIXED', join ' ', grep { $_ ne $f->{raw} } entries('FIXED'));
+        apply();
+        note('good', "Port $port is fixed no more: its key opens nothing");
+        return;
+    }
+    fail('adhoc-relay fixed [add [<port> [<name>]] | key <port> | del <port>]');
+}
+
+# the users, in a table: what each is of, until when, how much its meetings carried; their keys hidden
+sub user_list {
+    my ($only) = @_;
+    my @list = $only ? @$only : users();
+    my ($kb) = counted();
+    my %tag = map { $_->{id} => $_->{name} } tags();
+    table(['Name', 'Using', 'Until', 'Carried', 'Limit', 'Tags'], [map {
+            [$_->{name} || '-', $_->{of} eq 'password' ? 'any free port' : $_->{of} =~ /^@(.+)/ ? "the IP of $1" : "fixed port $_->{of}",
+             $_->{expires} || 'always', $_->{of} =~ /^@/ || $_->{direct} ? '-' : bytes_text(($kb->{$_->{key}} // 0) * 1024),
+             $_->{direct} ? 'direct only' : $_->{limit} ? bytes_text($_->{limit} * 1048576) : '-', join(' ', map { $tag{$_} // $_ } @{$_->{tags}}) || '-']
+        } @list],
+        $only ? 'None has these tags' : 'None yet: adhoc-relay user add password [<until YYYY-MM-DD> [<limit MB | direct> [<name> [<tags>]]]]');
+}
+
+# `with [any] <tags>` at the start of the words: [ any, the numbers of the tags ], the words after; none - undef
+sub with_tags {
+    my @w = @_;
+    return (undef, @w) unless @w && $w[0] eq 'with';
+    shift @w;
+    my $any = @w && $w[0] eq 'any' ? shift @w : 0;
+    fail('with [any] <tag>[,<tag>...]') unless @w;
+    return ([$any ? 1 : 0, tag_ids(shift @w)], @w);
+}
+
+# Users: keys given to others in place of the password, of the key of a fixed port, or of a read key of a record, each until a
+# day, its meetings counted and limited - and taken away, they open nothing
+sub user_cmd {
+    my ($what, @a) = @_;
+    if (!defined $what || $what eq 'with') {
+        my ($sel) = with_tags(grep { defined } $what, @a);
+        title('Users: a key given to someone in place of the password, the key of a fixed port, or a read key: it works as that key until its day, the traffic of its meetings is counted, and taken away it opens nothing.');
+        user_list($sel ? [users_with(@$sel)] : undef);
+        odd();
+        return;
+    }
+    if ($what eq 'tags') {
+        my ($which, $tags) = @a;
+        fail('adhoc-relay user tags <name | key> <tag>[,<tag>...] | -') unless defined $tags;
+        my ($a) = grep { $_->{key} eq $which || $_->{name} eq $which } users();
+        fail("No user $which") unless $a;
+        my @t = $tags eq '-' ? () : tag_ids($tags);
+        fail('8 tags at most') if uniq_tags(@t) > 8;
+        set('USERS', join ' ', map { $_ eq $a->{raw} ? user_entry({ %$a, tags => \@t }) : $_ } entries('USERS'));
+        apply();
+        return;
+    }
+    if ($what eq 'add') {
+        my ($of, $until, $limit, $name, $tags) = @a;
+        my $usage = 'adhoc-relay user add <password | port | @record> [<until YYYY-MM-DD | -> [<limit MB | direct | -> [<name> [<tags>]]]]';
+        fail($usage) unless defined $of;
+        fail("No fixed port $of") if $of =~ /^\d+$/ && !grep { $_->{port} == $of } fixed();
+        fail("No record $1") if $of =~ /^@(.+)$/ && !grep { $_->{name} eq $1 } records();
+        fail($usage) unless $of =~ /^(password|\d+|@[A-Za-z0-9_-]+)$/;
+        $until = '' if !defined $until || $until eq '-';
+        fail('The day is YYYY-MM-DD, its last day') unless $until eq '' || $until =~ /^\d{4}-\d\d-\d\d$/;
+        $limit = 0 if !defined $limit || $limit eq '-';
+        # direct: the direct path only - its clients reach its server by a call, never through this computer
+        my $direct = $limit eq 'direct' ? 1 : 0;
+        $limit = 0 if $direct;
+        fail('The limit is a number of megabytes, or direct - the direct path only') unless $limit =~ /^\d+$/;
+        $name = undef if defined $name && $name eq '-';
+        fail('A name is letters, digits, - and _') if defined $name && $name !~ /^[A-Za-z0-9_-]+$/;
+        my @t = defined $tags ? tag_ids($tags) : ();
+        fail('8 tags at most') if uniq_tags(@t) > 8;
+        my $user = { of => $of, key => new_key(), expires => $until, limit => $limit + 0, direct => $direct, name => $name // '', tags => \@t };
+        set('USERS', join ' ', entries('USERS'), user_entry($user));
+        apply();
+        print ' The user: ', paint($user->{key}, 'key'), "\n";
+        if ($of eq 'password') { print ' Its line, for the server it is given to: ', paint(server_line(1, $user->{key}, $conf{FIRST}), 'line'), "\n" }
+        elsif ($of =~ /^\d+$/) { print ' Its line, for the server it is given to: ', paint(server_line(0, $user->{key}, $of), 'line'), "\n" }
+        else { print ' It reads the IP of the record in place of its read key', "\n" }
+        return;
+    }
+    if ($what eq 'del') {
+        my ($sel, $which) = with_tags(@a);
+        fail('adhoc-relay user del <name | key> | with [any] <tags>') unless $sel || defined $which;
+        my @gone = $sel ? users_with(@$sel) : grep { $_->{key} eq $which || $_->{name} eq $which } users();
+        fail($sel ? 'No user has these tags' : "No user $which") unless @gone;
+        my %gone = map { $_->{raw} => 1 } @gone;
+        set('USERS', join ' ', grep { !$gone{$_} } entries('USERS'));
+        apply();
+        note('good', join(', ', map { $_->{name} || $_->{key} } @gone) . ': open nothing now, their meetings going on end too');
+        return;
+    }
+    fail('adhoc-relay user [with [any] <tags> | add <password | port | @record> [<until> [<limit MB | direct> [<name> [<tags>]]]] | tags <name | key> <tags> | del <name | key> | del with [any] <tags>]');
+}
+
+# the names of the tags of users: a number of 0-255 each, its name for people
+sub tag_cmd {
+    my ($what, $id, $name) = @_;
+    if (!defined $what) {
+        table(['Tag', 'Name', 'Users'], [map { my $t = $_; [$t->{id}, $t->{name}, scalar users_with(0, $t->{id})] } sort { $a->{id} <=> $b->{id} } tags()],
+            'None yet: adhoc-relay tag add <0-255> <name>');
+        return;
+    }
+    if ($what eq 'add') {
+        fail('adhoc-relay tag add <0-255> <name>') unless defined $name && $id =~ /^\d+$/ && $id <= 255 && $name =~ /^[A-Za-z0-9_-]+$/ && $name !~ /^\d+$/;
+        fail("Tag $id has a name already") if grep { $_->{id} == $id } tags();
+        fail("A tag is named $name already") if grep { $_->{name} eq $name } tags();
+        set('TAGS', join ' ', entries('TAGS'), "$id:$name");
+        save();
+        return;
+    }
+    if ($what eq 'del') {
+        my ($t) = grep { $_->{name} eq ($id // '') || $_->{id} eq ($id // '') } tags();
+        fail('No such tag') unless $t;
+        set('TAGS', join ' ', grep { $_ ne $t->{raw} } entries('TAGS'));
+        save();
+        note('good', "Tag $t->{id} has no name now; the users keep it");
+        return;
+    }
+    fail('adhoc-relay tag [add <0-255> <name> | del <number | name>]');
+}
+
+# a fixed port just made or given a new key: the line of its server
+sub fixed_line {
+    my ($port, $key, $name) = @_;
+    my $line = server_line(0, $key, $port, 0);
+    my ($ip) = address();
+    section("Fixed port $port" . (defined $name ? " \x{B7} $name" : ''));
+    show_line('Its server line', $line, how($line, read_form($line) ? undef : ($ip // '<address>') . ":$port"));
+    address_note() unless read_form($line);
+}
+
+# the computers whose IP this one keeps: a table, then the line of each
+sub record_list {
+    my %kept = kept_records();
+    section('Track the public IP of other relays', 'This computer has a fixed IP: it can keep track of the public IP of relays whose IP changes, for their servers. Add one by a name, and paste its line on it');
+    table(['Name', 'Its IP now', 'Reported', 'Read keys'],
+        [map { my $k = $kept{$_->{name}};
+            [$_->{name}, $k ? $k->[0] : 'no report yet', $k ? ago(time - $k->[1]) : '-', scalar @{$_->{reads}}] } records()],
+        $IN_MENU ? 'None yet: a - add one' : 'None yet: adhoc-relay record add <name>');
+    show_line("$_->{name}: its line, to paste on it", record_line($_), '') for records();
+}
+
+sub record_cmd {
+    my ($what, $name) = @_;
+    if (!defined $what) {
+        record_list();
+        address_note() if records();
+        odd();
+        return;
+    }
+    fail("adhoc-relay record $what <name>") unless defined $name;
+    my ($r) = grep { $_->{name} eq $name } records();
+    if ($what eq 'add') {
+        fail('A name is letters, digits, - and _') unless $name =~ /^[A-Za-z0-9_-]+$/;
+        fail("$name is kept already") if $r;
+        my $write = new_key();
+        my $read = new_key($write);
+        set('RECORDS', join ' ', entries('RECORDS'), "$name:$write:$read");
+        apply();
+        section("Track the IP of $name");
+        show_line('Its line: paste it on that computer', record_line({ write => $write, reads => [$read] }),
+            'There: adhoc-relay report add <line>, or Changing IP > On my public IP change, notify the following relays of its page');
+        address_note();
+        return;
+    }
+    fail("No computer named $name is kept") unless $r;
+    if ($what eq 'del') {
+        set('RECORDS', join ' ', grep { $_ ne $r->{raw} } entries('RECORDS'));
+        apply();
+        note('good', "The IP of $name is kept no more: its keys report and look up nothing");
+        return;
+    }
+    if ($what eq 'read') {
+        my $read = new_key();
+        set('RECORDS', join ' ', map { $_ eq $r->{raw} ? "$r->{name}:$r->{write}:" . join(',', @{$r->{reads}}, $read) : $_ } entries('RECORDS'));
+        apply();
+        print ' One more read key of ', paint($name, 'name'), ': ', paint($read, 'key'), "\n";
+        note('quiet', 'In the line of a server it stands after the first 🌐; one read key for each server lets you cut off one at a time');
+        show_line('The line with it, for that computer', record_line($r, $read), '');
+        return;
+    }
+    fail('adhoc-relay record [add <name> | read <name> | del <name>]');
+}
+
+# whom this computer reports its IP to: a table
+sub report_list {
+    my $sent = { sent_reports() };
+    my $n = 0;
+    table(['#', 'Relay', 'Servers can look it up', 'Last answer', 'It sees this computer as'],
+        [map { my $st = report_state($_, $sent); $n++;
+            [$n, "$_->{host}:$_->{at}", defined $_->{read} ? 'yes' : 'no: the line has no read key',
+             $st && $st->{answered} ? ago(time - $st->{answered}) : 'no answer yet', $st && $st->{seen} ne '-' ? $st->{seen} : '-'] } reports()],
+        'Nobody: for the servers the IP of this computer does not change' . ($IN_MENU ? '' : '. To report it: adhoc-relay report add <line>'));
+}
+
+sub report_cmd {
+    my ($what, $arg) = @_;
+    if (!defined $what) {
+        section('On my public IP change, notify the following relays', 'This computer reports its IP every 60 s, and at once when it changes; the servers look it up there');
+        report_list();
+        odd();
+        return;
+    }
+    if ($what eq 'add') {
+        my $r = report_of($arg // '')
+            or fail('Not the line of a relay that keeps IPs. Paste it whole, as that relay gives it: ✏️<write key>👀<read key>👉<its address>:<port> - or ! ? > for ✏️ 👀 👉');
+        fail('This line is added already')
+            if grep { $_->{write} eq $r->{write} && $_->{host} eq $r->{host} && $_->{at} == $r->{at} } reports();
+        set('REPORTS', join ' ', entries('REPORTS'), pretty(plain($arg)));
+        apply();
+        note('good', "This computer reports its IP to $r->{host}:$r->{at}: every 60 s, and at once when it changes");
+        if (defined $r->{read}) { note('warn', 'Give every server its new line: from then on it finds this computer wherever its IP moves'); lines() }
+        else { note('warn', 'The line has no read key: the lines of the servers keep the IP of today. Ask the owner of that relay for its line again') }
+        return;
+    }
+    if ($what eq 'del') {
+        my @r = reports();
+        fail('adhoc-relay report del <number>: the # of adhoc-relay report') unless defined $arg && $arg =~ /^\d+$/ && $arg >= 1 && $arg <= @r;
+        my $gone = $r[$arg - 1];
+        set('REPORTS', join ' ', grep { $_ ne $gone->{raw} } entries('REPORTS'));
+        apply();
+        note('good', "This computer reports its IP to $gone->{host}:$gone->{at} no more");
+        return;
+    }
+    fail('adhoc-relay report [add <line> | del <number>]');
+}
+
+sub address_cmd {
+    my ($to) = @_;
+    if (!defined $to) {
+        my ($a, $from) = address();
+        defined $a ? print(' ', paint($a, 'good'), paint("  $from", 'quiet'), "\n") : note('warn', 'Not found: adhoc-relay address <name or IP>');
+        return;
+    }
+    if ($to eq 'auto') { set('ADDRESS', '') }
+    else {
+        fail('A name in DNS or an IPv4 address, such as router.example.org or 203.0.113.7; auto - found automatically')
+            unless $to =~ /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+        set('ADDRESS', $to);
+    }
+    # the lines only take it: nothing to load
+    save();
+    @address = ();
+    address_cmd();
+    note('warn', 'Give every server its new line: adhoc-relay lines') unless reports();
+}
+
+# ── what this computer is, in a frame: as the card on top of the page of a router ──
+
+sub header {
+    my $table = `nft list table ip adhoc_relay 2>/dev/null`;
+    my $running = $? == 0;
+    my $s = $running ? sets($table) : {};
+    my $give = $running && giving();
+    my ($addr, $from) = address();
+    my @rep = reports();
+    my $sent = { sent_reports() };
+    my %kept = kept_records();
+    my @rows;
+    push @rows, !$running ? [undef, "$BOX{dot} Not running - its rules are not in the kernel: " . (systemd() ? 'systemctl start adhoc-relay' : 'see adhoc-relay help'), 'bad']
+        : !$give ? [undef, "$BOX{dot} Not serving - give, which gives the ports, has stopped: systemctl restart adhoc-relay", 'bad']
+        : ($conf{PASSWORD} // '') !~ /^[A-Za-z0-9]{16}$/ ? [undef, "$BOX{dot} Not serving - there is no password: servers cannot ask for a port", 'bad']
+        : [undef, "$BOX{dot} Running - servers get ports here, their clients reach them", 'good'];
+    if (@rep) {
+        my ($last) = sort { $b->{answered} <=> $a->{answered} } grep { $_ && $_->{answered} } map { report_state($_, $sent) } @rep;
+        push @rows, ['Public IP', ($last ? "$last->{seen} \x{B7} " : '') . 'changes, reported to ' . join(', ', map { $_->{host} } @rep)
+            . ($last ? ', ' . ago(time - $last->{answered}) : ': no answer yet'), ''];
+    } else {
+        push @rows, ['Public IP', defined $addr ? "$addr \x{B7} fixed, $from" : 'not found: set a DNS name or the IP in Settings', defined $addr ? '' : 'warn'];
+    }
+    push @rows, ['Ports', "$conf{FIRST} takes the requests \x{B7} " . ($conf{FIRST} + 1) . "-$conf{LAST} go to servers", ''];
+    if ($running) {
+        my $given = @{$s->{given} // []};
+        my $met = () = meetings();
+        push @rows, ['Now', ($given == 1 ? '1 port held' : "$given ports held") . " \x{B7} " . ($met == 1 ? '1 connection' : "$met connections"), ''];
+    }
+    my @r = records();
+    push @rows, ['Tracks the public IP of', join(', ', map { $_->{name} . ($kept{$_->{name}} ? ' (' . ago(time - $kept{$_->{name}}[1]) . ')' : ' (no report yet)') } @r), ''] if @r;
+    panel('AdHoc Relay', \@rows);
+}
+
+# ── the settings, one by one ──
+
+# each: its name in the file, its words, what it is, its check - the words of what is wrong, or undef -, its group
+my @SETTINGS = (
+    [PASSWORD => 'Password', '16 letters or digits. Servers ask for a port with it. After a change, give every server its new line',
+        sub { $_[0] =~ /^[A-Za-z0-9]{16}$/ ? undef : '16 letters and digits, or new' }, 'Basic'],
+    [ADDRESS => 'DNS name', 'Optional. A name in DNS that points to this computer, or its IP: the lines carry it. auto - the public IP, found automatically',
+        sub { $_[0] eq 'auto' || $_[0] =~ /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/ ? undef : 'a name in DNS, an IPv4 address, or auto' }, 'Basic'],
+    [FIRST => 'First port', 'Servers ask this port for a port. The ports after it, up to the last, are given to servers',
+        sub { $_[0] =~ /^\d+$/ && $_[0] >= 1 && $_[0] < $conf{LAST} ? undef : "a port below the last, $conf{LAST}" }, 'Ports'],
+    [LAST => 'Last port', 'A firewall or a router in front of this computer must let the range through, TCP and UDP',
+        sub { $_[0] =~ /^\d+$/ && $_[0] > $conf{FIRST} && $_[0] <= 65535 ? undef : "a port above the first, $conf{FIRST}" }, 'Ports'],
+    [WAIT => 'Hold, seconds', 'How long a server keeps its port after its last knock. Servers knock every 20 s: 30 or more',
+        sub { $_[0] =~ /^\d+$/ && $_[0] >= 30 ? undef : '30 or more: servers knock every 20 s' }, 'Ports'],
+    [TRIES => 'Wrong tries', 'Requests and knocks with a wrong password or key, per address. One more is allowed each minute; past them the address is blocked',
+        sub { $_[0] =~ /^\d+$/ && $_[0] >= 1 && $_[0] <= 1000 ? undef : '1 to 1000' }, 'Protection'],
+    [BLOCK => 'Block, seconds', 'How long a blocked address is ignored',
+        sub { $_[0] =~ /^\d+$/ && $_[0] >= 1 ? undef : 'seconds, 1 or more' }, 'Protection'],
+    [GUARD => 'Stop password guessing', 'on: an address that makes too many short connections to a port is blocked at that port. off: only for a service whose connections are short by nature',
+        sub { $_[0] =~ /^[01]$/ ? undef : 'on or off' }, 'Protection'],
+    [SHORT => 'Short, seconds', 'A connection that ends sooner counts as a password tried and refused',
+        sub { $_[0] =~ /^\d+$/ && $_[0] >= 1 && $_[0] <= 3600 ? undef : '1 to 3600' }, 'Protection'],
+    [GUESSES => 'Short connections', 'Allowed per address and port. One more is allowed each 10 minutes; past them the address is blocked at that port',
+        sub { $_[0] =~ /^\d+$/ && $_[0] >= 1 && $_[0] <= 1000 ? undef : '1 to 1000' }, 'Protection'],
+);
+
+# the key of a setting in the menu: 1 to 9, then 0
+sub setting_key { $_[0] == 10 ? 0 : $_[0] }
+
+sub settings_show {
+    title('Settings');
+    my ($n, $group) = (0, '');
+    for (@SETTINGS) {
+        my ($k, $words, $about, undef, $g) = @$_;
+        if ($g ne $group) { section($group = $g) }
+        my $v = $k eq 'PASSWORD' ? (($utf ? "\x{2022}" : '*') x length($conf{$k} // '')) : $conf{$k} // '';
+        $v = 'auto' if $k eq 'ADDRESS' && $v eq '';
+        $v = $v ? 'on' : 'off' if $k eq 'GUARD';
+        print '   ', ($IN_MENU ? chip(setting_key(++$n)) . ' ' : ''), paint(sprintf('%-24s', $words), 'name'), paint($v eq '' ? '-' : $v, 'good'), "\n";
+        print '   ', ($IN_MENU ? '    ' : ''), paint($_, 'quiet'), "\n" for wrap($about, width() - 8);
+    }
+    section('Uninstall');
+    print '   ', paint('Removes AdHoc Relay from this computer, its settings too: sudo sh adhoc-relay-linux.sh remove', 'quiet'), "\n";
+}
+
+# a setting changed, checked, saved and loaded: by its name in the file or its number
+sub set_cmd {
+    my ($which, $v) = @_;
+    my ($s) = grep { $which =~ /^\d+$/ ? $_ == $SETTINGS[$which - 1] : uc($which) eq $_->[0] } @SETTINGS;
+    fail('adhoc-relay set <setting> <value>; the settings: ' . join(' ', map { lc $_->[0] } @SETTINGS)) unless $s && defined $v;
+    my ($k, $words, $about, $check) = @$s;
+    return password('new') if $k eq 'PASSWORD' && $v eq 'new';
+    $v = { on => 1, off => 0 }->{lc $v} // $v if $k eq 'GUARD';
+    my $bad = $check->($v);
+    fail("$words: $bad") if $bad;
+    return address_cmd($v) if $k eq 'ADDRESS';
+    set($k, $v);
+    apply();
+    note('good', "$words: " . ($k eq 'GUARD' ? ($v ? 'on' : 'off') : $v));
+    if ($k eq 'FIRST' || $k eq 'LAST') {
+        my @out = grep { $_->{port} <= $conf{FIRST} || $_->{port} > $conf{LAST} } fixed();
+        note('warn', 'A fixed port out of the range opens nothing now: ' . join(' ', map { $_->{port} } @out)) if @out;
+        note('warn', 'The lines of the servers have the new first port: give every server its new line') if $k eq 'FIRST';
+    }
+}
+
+# ── the menu: what a person does here, one screen each, as the tabs of the page of a router ──
+
+# a question; Enter - `default`
+sub ask {
+    my ($q, $default) = @_;
+    print "\n ", paint("$BOX{arrow} $q", 'news'), (defined $default && $default ne '' ? paint(" [$default]", 'quiet') : ''), ' ';
+    my $a = <STDIN>;
+    exit 0 unless defined $a;
+    utf8::decode($a);
+    $a =~ s/^\s+|\s+$//g;
+    return $a eq '' ? $default : $a;
+}
+
+# One key pressed, no Enter after it: the terminal raw for it. Enter - "\n", Escape and the keys of arrows - "\e"; Ctrl+C and
+# Ctrl+D end. Without a terminal, the next line.
+sub key {
+    my ($q) = @_;
+    print "\n ", paint("$BOX{arrow} $q", 'news'), ' ' if defined $q;
+    unless (-t STDIN) {
+        my $l = <STDIN>;
+        exit 0 unless defined $l;
+        $l =~ s/^\s+|\s+$//g;
+        return $l eq '' ? "\n" : $l;
+    }
+    require POSIX;
+    my $t = POSIX::Termios->new;
+    $t->getattr(0);
+    my $was = $t->getlflag;
+    $t->setlflag($was & ~(POSIX::ECHO() | POSIX::ICANON()));
+    $t->setcc(POSIX::VMIN(), 1);
+    $t->setcc(POSIX::VTIME(), 0);
+    $t->setattr(0, POSIX::TCSANOW());
+    sysread STDIN, my $c, 1;
+    # the rest of a key that sends several bytes, an arrow: taken away
+    if (defined $c && $c eq "\e") {
+        $t->setcc(POSIX::VMIN(), 0);
+        $t->setcc(POSIX::VTIME(), 1);
+        $t->setattr(0, POSIX::TCSANOW());
+        1 while sysread STDIN, my $more, 8;
+    }
+    $t->setlflag($was);
+    $t->setattr(0, POSIX::TCSANOW());
+    print "\n" if defined $q;
+    exit 0 if !defined $c || $c eq "\x04" || $c eq "\x03";
+    return $c eq "\r" ? "\n" : $c;
+}
+
+# the window cleared: a screen of the menu starts at its top
+sub clear { print "\e[H\e[2J" if $colour && -t STDIN }
+
+# what an action said stays until a key: the screen is drawn anew after it
+sub pause { key('Press any key') }
+
+# an action of a screen: what fails is said, not the end of the menu; what it said is read before the screen comes again
+sub act {
+    my ($what) = @_;
+    eval { $what->(); 1 } or note('bad', $@ =~ s/\s+$//r);
+    pause();
+}
+
+# the first free port from the first + 1000 on: easy to remember
+sub free_port {
+    my %taken = map { $_->{port} => 1 } fixed();
+    my $p = $conf{FIRST} + 1000 <= $conf{LAST} ? $conf{FIRST} + 1000 : $conf{FIRST} + 1;
+    $p++ while $taken{$p} && $p < $conf{LAST};
+    return $p;
+}
+
+# Esc, Enter, q or Backspace: back to the menu
+sub back { $_[0] =~ /^(\e|\n|q|\x7f|\x08)$/ }
+
+sub screen_lines {
+    clear();
+    lines();
+    keys_bar(['any key', 'back']);
+    key();
+}
+
+sub screen_now {
+    while (1) {
+        clear();
+        title('Now: What goes through this computer now, and what came in the last 10 minutes');
+        status();
+        keys_bar(['r', 'refresh'], ['Esc', 'back']);
+        return unless lc key() eq 'r';
+    }
+}
+
+sub screen_fixed {
+    while (1) {
+        load();
+        @address = ();
+        clear();
+        fixed_cmd();
+        keys_bar(['a', 'add a fixed port'], fixed() ? (['k', 'new key'], ['d', 'delete']) : (), ['Esc', 'back']);
+        my $c = lc key();
+        return if back($c);
+        if ($c eq 'a') {
+            act(sub {
+                my $port = ask('Port', free_port());
+                my $name = ask('Name, optional - such as office-rdp');
+                fixed_cmd('add', $port, $name);
+            });
+        } elsif (($c eq 'k' || $c eq 'd') && fixed()) {
+            my $port = ask('Which port');
+            act(sub { fixed_cmd($c eq 'k' ? 'key' : 'del', $port) }) if defined $port;
+        }
+    }
+}
+
+# Changing IP, as on the page: On my public IP change, notify the following relays, then Track the public IP of other relays
+sub screen_ip {
+    while (1) {
+        load();
+        @address = ();
+        clear();
+        title('Changing IP: When the provider changes the public IP of a computer now and then, another AdHoc Relay of a fixed IP keeps track of it: the computer reports its IP there every 60 s and at once when it changes, the servers look it up there. The ports stay the same.');
+        section('On my public IP change, notify the following relays');
+        my $n = 0;
+        for (['On a computer of a fixed IP: ', 'sudo adhoc-relay record add <a name for this one>', 'on a router: AdHoc Relay > Changing IP > Track the public IP of other relays - a name, Add, Copy its line'],
+             ['Here: ', 'p', 'and paste that line'],
+             ['Give the servers their lines again: ', '', 'from then on they find this computer wherever its IP moves']) {
+            my ($what, $do, $more) = @$_;
+            print '   ', paint(++$n . '.', 'name'), ' ', $what, ($do eq 'p' ? chip('p') . ' ' : $do ne '' ? paint($do, 'line') : ''), ($do eq '' || $do eq 'p' ? $more : ''), "\n";
+            print '      ', paint($more, 'quiet'), "\n" if $do ne '' && $do ne 'p';
+        }
+        print "\n";
+        report_list();
+        record_list();
+        keys_bar(['p', 'paste a line'], reports() ? ['x', 'stop reporting'] : (), ['a', 'track the IP of a computer'],
+            records() ? (['r', 'one more read key'], ['d', 'stop keeping']) : (), ['Esc', 'back']);
+        my $c = lc key();
+        return if back($c);
+        if ($c eq 'p') {
+            my $line = ask('The line');
+            act(sub { report_cmd('add', $line) }) if defined $line;
+        } elsif ($c eq 'x' && reports()) {
+            my $n = ask('Which #');
+            act(sub { report_cmd('del', $n) }) if defined $n;
+        } elsif ($c eq 'a') {
+            my $name = ask('Its name - such as dacha');
+            act(sub { record_cmd('add', $name) }) if defined $name;
+        } elsif (($c eq 'r' || $c eq 'd') && records()) {
+            my $name = ask('Which - its name');
+            act(sub { record_cmd($c eq 'r' ? 'read' : 'del', $name) }) if defined $name;
+        }
+    }
+}
+
+sub screen_settings {
+    while (1) {
+        load();
+        @address = ();
+        clear();
+        settings_show();
+        keys_bar(['1-9 0', 'change one'], ['Esc', 'back']);
+        my $c = key();
+        return if back(lc $c);
+        next unless $c =~ /^\d$/;
+        my $i = $c == 0 ? 10 : $c;
+        next if $i > @SETTINGS;
+        my ($k, $words) = @{$SETTINGS[$i - 1]};
+        my $v = ask($k eq 'PASSWORD' ? 'Password: 16 letters and digits; new - a random one' : $k eq 'ADDRESS' ? 'DNS name or IP; auto - found automatically' : $words,
+            $k eq 'PASSWORD' ? 'new' : $k eq 'ADDRESS' && ($conf{$k} // '') eq '' ? 'auto' : $k eq 'GUARD' ? ($conf{$k} ? 'on' : 'off') : $conf{$k});
+        act(sub { set_cmd($i, $v) }) if defined $v;
+    }
+}
+
+sub menu {
+    $IN_MENU = 1;
+    my @items = (
+        [ "\x{1F4CB}", 'Server lines', 'one for each server, to copy', \&screen_lines ],
+        [ "\x{1F4CC}", 'Fixed ports', 'a port of its own for a server, the same every time', \&screen_fixed ],
+        [ "\x{1F4CA}", 'Now', 'connections, ports held, blocked addresses, the last 10 minutes', \&screen_now ],
+        [ "\x{1F504}", 'Changing IP', 'when the public IP of this computer changes, or of another', \&screen_ip ],
+        [ "\x{2699}\x{FE0F}", 'Settings', 'password, DNS name, ports, protection', \&screen_settings ],
+    );
+    while (1) {
+        load();
+        @address = ();
+        clear();
+        print "\n";
+        header();
+        password_note();
+        print "\n";
+        my $n = 0;
+        for (@items) {
+            my ($sign, $name, $about) = @$_;
+            print '   ', chip(++$n), '  ', ($utf ? "$sign " . (cols($sign) < 2 ? ' ' : '') : ''), paint(sprintf('%-16s', $name), 'name'), paint($about, 'quiet'), "\n";
+        }
+        keys_bar(['1-' . @items, 'open'], ['q', 'quit']);
+        my $c = lc key();
+        last if $c =~ /^(q|\e|0)$/;
+        next unless $c =~ /^\d$/ && $c >= 1 && $c <= @items;
+        eval { $items[$c - 1][3]->(); 1 } or do { note('bad', $@ =~ s/\s+$//r); pause() };
+    }
+    clear();
+}
+
+sub help {
+    print <<"END";
+
+ AdHoc Relay on this computer. As root: sudo adhoc-relay <command>
+
+   adhoc-relay                              in a terminal the menu; in a pipe the same as status
+   adhoc-relay status                       whether it runs, and what goes through it now
+
+   Server lines
+   adhoc-relay lines                        the lines to copy: one for each server, and one for each computer whose IP
+                                           this one keeps
+
+   Fixed ports: a port of its own for a server, the same every time, opened by its own key
+   adhoc-relay fixed                        the fixed ports
+   adhoc-relay fixed add [<port> [<name>]]  one more, with a new key - a free port from the first + 1000 on, when none
+                                            is given; prints the line of its server
+   adhoc-relay fixed key <port>             a new key: the old line opens nothing then
+   adhoc-relay fixed del <port>
+
+   Users: keys given to others in place of the password, the key of a fixed port, or a read key - until a day, their
+   traffic counted and limited; taken away, they open nothing
+   adhoc-relay user [with [any] <tags>]     the users, and what their meetings carried; with - those with each of the
+                                            tags, with any - with one of them. Tags: numbers 0-255 or names, commas between
+   adhoc-relay user add <password | port | \@record> [<until YYYY-MM-DD | -> [<limit MB | direct | -> [<name | -> [<tags>]]]]
+                                            one more, with a new key: prints it, and the line of its server; direct -
+                                            its traffic can be passed via a direct connection only
+   adhoc-relay user tags <name | key> <tags | ->   its tags, 8 at most; - none
+   adhoc-relay user del <name | key>        taken away: it opens nothing, its meetings going on end
+   adhoc-relay user del with [any] <tags>   all those with the tags
+   adhoc-relay tag [add <0-255> <name> | del <number | name>]   the names of the tags
+
+   Changing IP - On my public IP change, notify the following relays: this computer reports its IP to a relay of a fixed IP, the servers look it up there
+   adhoc-relay report                       to whom, and their last answers
+   adhoc-relay report add <line>            the line that relay gives: ✏️<write key>👀<read key>👉<its address>:<port>
+   adhoc-relay report del <number>
+
+   Changing IP - Track the public IP of other relays: this one has a fixed IP
+   adhoc-relay record                       the computers whose IP it keeps, and the line of each
+   adhoc-relay record add <name>            one more, with a new write key and read key: prints its line, for that computer
+   adhoc-relay record read <name>           one more read key of it
+   adhoc-relay record del <name>
+
+   For a program that sets this computer up from afar, over SSH
+   adhoc-relay api get                      everything as JSON: the release, the settings, the lists, what it does now
+   adhoc-relay api set                      the JSON of the parts to change, on the standard input: checked, saved, loaded
+
+   Settings
+   adhoc-relay settings                     all of them
+   adhoc-relay set <setting> <value>        one of them, such as: adhoc-relay set wait 120
+   adhoc-relay password [new]               the password; new - a random one: give every server its new line then
+   adhoc-relay address [<name> | auto]      the DNS name or the IP of this computer in the lines; auto - found automatically
+
+ The settings are in $CONF; a command that changes them loads them at once.
+ Uninstall: sudo sh adhoc-relay-linux.sh remove
+END
+}
+
+# ── adhoc-relay api: for a program that sets this computer up from afar, over SSH ──
+# The same JSON as `adhoc-relay api` of an OpenWrt router: a program needs not know which of the two the relay is. The form of it is
+# in the README, section API. `api get` - everything; `api set` - the parts given on the standard input replace those there are, a
+# part left out stays; checked first, nothing written when something is wrong: `{ "error": ... }` and the code 1.
+
+# JSON by hand: perl-base of Debian has no module for it. A number is blessed 'N', true and false are \1 and \0
+sub N { my $v = shift; bless \$v, 'N' }
+sub json_out {
+    my ($v) = @_;
+    return 'null' unless defined $v;
+    my $r = ref $v;
+    return ${$v} if $r eq 'N';
+    return $$v ? 'true' : 'false' if $r eq 'SCALAR';
+    return '[' . join(',', map { json_out($_) } @$v) . ']' if $r eq 'ARRAY';
+    return '{' . join(',', map { json_out($_) . ':' . json_out($v->{$_}) } sort keys %$v) . '}' if $r eq 'HASH';
+    (my $t = $v) =~ s/(["\\])/\\$1/g;
+    $t =~ s/\n/\\n/g;
+    $t =~ s/\t/\\t/g;
+    $t =~ s/([\x00-\x1f])/sprintf('\\u%04x', ord $1)/ge;
+    return qq("$t");
+}
+sub json_in {
+    my ($t) = @_;
+    my $at = 0;
+    my $ws = sub { $at++ while $at < length $t && substr($t, $at, 1) =~ /\s/ };
+    my $value;
+    $value = sub {
+        $ws->();
+        my $c = substr($t, $at, 1);
+        if ($c eq '{') {
+            $at++; my %h; $ws->();
+            if (substr($t, $at, 1) eq '}') { $at++; return \%h }
+            while (1) {
+                my $k = $value->();
+                die "a key is a string\n" if ref $k;
+                $ws->(); die "':' expected\n" unless substr($t, $at++, 1) eq ':';
+                $h{$k} = $value->();
+                $ws->(); my $n = substr($t, $at++, 1);
+                return \%h if $n eq '}';
+                die "',' or '}' expected\n" unless $n eq ',';
+            }
+        }
+        if ($c eq '[') {
+            $at++; my @a; $ws->();
+            if (substr($t, $at, 1) eq ']') { $at++; return \@a }
+            while (1) {
+                push @a, $value->();
+                $ws->(); my $n = substr($t, $at++, 1);
+                return \@a if $n eq ']';
+                die "',' or ']' expected\n" unless $n eq ',';
+            }
+        }
+        if ($c eq '"') {
+            $at++; my $s = '';
+            while (1) {
+                die "a string not closed\n" if $at >= length $t;
+                my $ch = substr($t, $at++, 1);
+                return $s if $ch eq '"';
+                if ($ch eq '\\') {
+                    my $e = substr($t, $at++, 1);
+                    if ($e eq 'u') {
+                        my $code = hex substr($t, $at, 4); $at += 4;
+                        if ($code >= 0xD800 && $code < 0xDC00 && substr($t, $at, 2) eq '\\u') { # a pair of surrogates: one character
+                            my $low = hex substr($t, $at + 2, 4); $at += 6;
+                            $code = 0x10000 + (($code - 0xD800) << 10) + ($low - 0xDC00);
+                        }
+                        $s .= chr $code;
+                    } else { $s .= { n => "\n", t => "\t", r => "\r", b => "\b", f => "\f" }->{$e} // $e }
+                } else { $s .= $ch }
+            }
+        }
+        if (substr($t, $at) =~ /^(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)/) { $at += length $1; return $1 + 0 }
+        if (substr($t, $at, 4) eq 'true') { $at += 4; return 1 }
+        if (substr($t, $at, 5) eq 'false') { $at += 5; return 0 }
+        if (substr($t, $at, 4) eq 'null') { $at += 4; return undef }
+        die "not JSON at $at\n";
+    };
+    my $v = $value->();
+    $ws->();
+    die "more after the JSON\n" if $at < length $t;
+    return $v;
+}
+
+# a span of seconds as nft writes it, cut to seconds: 1m3s
+sub nft_span {
+    my ($s) = @_;
+    return '0s' unless $s;
+    my $t = '';
+    for ([86400, 'd'], [3600, 'h'], [60, 'm']) { if ($s >= $_->[0]) { $t .= int($s / $_->[0]) . $_->[1]; $s %= $_->[0] } }
+    return $t . ($s ? "${s}s" : '') || '0s';
+}
+
+# what it does now: as `state status` and `state address` of a router
+sub api_state {
+    my $table = `nft list table ip adhoc_relay 2>/dev/null`;
+    my %st = (running => \($? == 0 ? 1 : 0));
+    my ($addr) = address();
+    $st{address} = $addr if defined $addr;
+    my $udp = IO::Socket::INET->new(Proto => 'udp', PeerAddr => '1.1.1.1', PeerPort => 53);
+    my $local = $udp ? $udp->sockhost : undef;
+    $st{wan} = $local if defined $local && !public($local);
+    return \%st unless ${$st{running}};
+    $st{giving} = \(giving() ? 1 : 0);
+    my $s = sets($table);
+    my $set = sub { @{$s->{$_[0]} // []} };
+    my %owner = map { $_->{key}[0] => $_->{key}[1] } $set->('holder');
+    my %holds = map { ("$_->{key}[0] $_->{key}[1]" => 1) } $set->('holder');
+    my %open = map { $_->{key}[0] => 1 } $set->('open');
+    my %dials;
+    for ($set->('seen')) { $dials{$_->{key}[0]} //= "$_->{key}[1]:$_->{key}[2]" }
+    $st{ports} = [map {
+        my $p = $_->{key}[0];
+        my $state = !$open{$p} ? 'held' : $dials{$p} ? 'dialing' : 'open';
+        { port => N($p), free => nft_span($_->{left}), state => $state, (defined $owner{$p} ? (a => $owner{$p}) : ()),
+          ($state eq 'dialing' ? (dials => $dials{$p}) : ()) }
+    } sort { $a->{key}[0] <=> $b->{key}[0] } $set->('given')];
+    $st{blocked} = [(map { { address => $_->{key}[0], ends => nft_span($_->{left}) } } $set->('blocked')),
+                    (map { { address => $_->{key}[0], ends => nft_span($_->{left}), port => N($_->{key}[1]) } } $set->('guessing'))];
+    my @m;
+    my %names = user_names();
+    if (open my $f, '<', '/proc/net/nf_conntrack') {
+        while (<$f>) {
+            next unless / tcp / && /mark=(\d+)/ && ($1 & 0x08000000);
+            my ($mark, $user) = ($1, $names{($1 >> 16) & 255});
+            my @w = split;
+            my (@src, @sport, @dport, $bytes);
+            for (@w) {
+                my ($k, $v) = split /=/, $_, 2;
+                next unless defined $v;
+                push @src, $v if $k eq 'src';
+                push @sport, $v if $k eq 'sport';
+                push @dport, $v if $k eq 'dport';
+                $bytes += $v if $k eq 'bytes';
+            }
+            my ($c, $v) = $mark & 0x02000000 ? (1, 0) : (0, 1);
+            push @m, { port => N($dport[0]), b => "$src[$c]:$sport[$c]", a => "$src[$v]:$sport[$v]", state => $w[5], (defined $bytes ? (bytes => N($bytes)) : ()),
+                (defined $user ? (user => $user) : ()) };
+        }
+        close $f;
+    }
+    # the ports: when each was used last - its newest meeting of the last day, of the set met -, the client, the user when the
+    # meeting was of one; and the user each port given is marked with now, of the map port_user. The number of a user is bits
+    # 16-23 of a mark
+    my %u;
+    for ($set->('met')) {
+        my ($p, $ip, $sp, $mark) = @{$_->{key}};
+        my $ago = 86400 - ($_->{left} // 0);
+        next if exists $u{$p} && $u{$p}{ago} <= $ago;
+        $u{$p} = { port => $p, ago => $ago, from => "$ip:$sp", user => $names{(hex($mark // 0) >> 16) & 255} };
+    }
+    $st{used} = [map { { port => N($_->{port}), ago => N($_->{ago}), from => $_->{from}, (defined $_->{user} ? (user => $_->{user}) : ()) } }
+        sort { $a->{port} <=> $b->{port} } values %u];
+    my @marked;
+    if ($table =~ /map port_user \{.*?elements = \{([^}]*)\}/s) {
+        for (split /,/, $1) {
+            next unless /(\d+)\b.*:\s*(0x[0-9a-f]+)/;
+            my $n = $names{(hex($2) >> 16) & 255};
+            push @marked, { port => N($1), user => $n } if defined $n;
+        }
+    }
+    $st{marked} = \@marked;
+
+    # the users of ports: the kilobytes their meetings carried, and their limit in megabytes
+    my ($kb, $limit) = counted();
+    my %named = map { $_->{key} => $_->{name} } users();
+    $st{users} = [map { { key => $_, name => ($named{$_} || '-'), kbytes => N($kb->{$_}),
+        (defined $limit->{$_} ? (limit => N($limit->{$_})) : ()) } } sort keys %$kb];
+    $st{meetings} = \@m;
+    my %blocked = map { $_->{key}[0] => 1 } $set->('blocked');
+    my %guessing = map { ("$_->{key}[0] $_->{key}[1]" => 1) } $set->('guessing');
+    my @tries;
+    for my $kind (qw(t_asked t_knocked t_refused t_dialed t_wrote t_read t_called)) {
+        for ($set->($kind)) {
+            my ($a, $sport, $port) = @{$_->{key}};
+            my $what = $kind eq 't_asked' ? 'request' : $kind eq 't_wrote' ? 'wrote' : $kind eq 't_read' ? 'read' : $kind eq 't_called' ? 'call'
+                : $kind eq 't_knocked' ? ($holds{"$port $a"} ? 'knock' : 'stranger')
+                : $kind eq 't_refused' ? ($blocked{$a} ? 'blocked' : 'wrong')
+                : $holds{"$port $a"} ? 'dial-a' : $guessing{"$a $port"} ? 'guessing' : 'dial';
+            push @tries, { ago => N(600 - ($_->{left} // 600)), from => "$a:$sport", port => N($port), what => $what };
+        }
+    }
+    @tries = sort { ${$a->{ago}} <=> ${$b->{ago}} } @tries;
+    $st{tries_all} = N(scalar @tries);
+    $st{tries} = [@tries[0 .. (@tries > 30 ? 29 : $#tries)]];
+    my $now = time;
+    my %kept = kept_records();
+    $st{records} = [map { my $k = $kept{$_}; { name => $_, address => $k->[0], ago => N(max0($now - $k->[1])) } } sort keys %kept];
+    my %sent = sent_reports();
+    $st{reports} = [map { my $r = $sent{$_};
+        { to => $_, ($r->{sent} ? (sent => N(max0($now - $r->{sent}))) : ()), ($r->{answered} ? (answered => N(max0($now - $r->{answered}))) : ()),
+          (defined $r->{seen} && $r->{seen} ne '-' ? (seen => $r->{seen}) : ()) } } sort keys %sent];
+    return \%st;
+}
+sub max0 { $_[0] > 0 ? $_[0] : 0 }
+
+sub api_release {
+    open my $f, '<', '/usr/share/adhoc-relay/version' or return undef;
+    my $v = <$f> // '';
+    close $f;
+    $v =~ s/\s+//g;
+    return $v eq '' ? undef : $v;
+}
+
+sub api_get {
+    return {
+        api => N(1),
+        system => 'linux',
+        release => api_release(),
+        settings => {
+            enabled => \(1), password => $conf{PASSWORD} // '',
+            (map { lc($_) => N($conf{$_} // 0) } qw(FIRST LAST WAIT TRIES BLOCK SHORT GUESSES)),
+            guard => \(($conf{GUARD} // 1) ? 1 : 0), address => $conf{ADDRESS} // '',
+        },
+        fixed => [map { { port => N($_->{port}), key => $_->{key}, name => $_->{name} // '' } } fixed()],
+        records => [map { { name => $_->{name}, write => $_->{write}, read => [@{$_->{reads}}] } } records()],
+        reports => [map { pretty(plain($_->{raw})) } reports()],
+        users => [map { { name => $_->{name}, key => $_->{key}, of => $_->{of}, expires => $_->{expires}, limit => N($_->{limit}), direct => \($_->{direct} ? 1 : 0), tags => [map { N($_) } @{$_->{tags}}] } } users()],
+        tags => [map { { id => N($_->{id}), name => $_->{name} } } tags()],
+        state => api_state(),
+    };
+}
+
+sub api_fail { print json_out({ error => $_[0] }), "\n"; exit 1 }
+
+# What is given, merged into what there is and checked as `rules load` checks it: the list of what is wrong
+sub api_check {
+    my ($w) = @_;
+    my $s = $w->{settings};
+    my @bad;
+    my $int = sub { defined $_[0] && $_[0] =~ /^\d+$/ && $_[0] >= $_[1] && $_[0] <= $_[2] };
+    push @bad, 'settings.enabled: a Linux computer runs AdHoc Relay as its service - systemctl stop adhoc-relay stops it' unless $s->{enabled};
+    push @bad, 'settings.password: 16 letters and digits' unless ($s->{password} // '') =~ /^[A-Za-z0-9]{16}$/;
+    push @bad, 'settings.first, settings.last: ports, the first below the last'
+        unless $int->($s->{first}, 1, 65534) && $int->($s->{last}, ($s->{first} // 0) + 1, 65535);
+    $int->($s->{$_}, 0, 86400) or push @bad, "settings.$_: a whole number, 0 or more" for qw(wait tries block short guesses);
+    push @bad, 'settings.address: a name in DNS, an IPv4 address, or empty - found'
+        unless ($s->{address} // '') eq '' || $s->{address} =~ /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+    my (%used, %ports, %names);
+    my $key = sub {
+        my ($k, $where) = @_;
+        if (($k // '') !~ /^[A-Za-z0-9]{16}$/) { push @bad, "$where: 16 letters and digits" }
+        elsif ($used{$k}) { push @bad, "$where: the same key as $used{$k}" }
+        else { $used{$k} = $where }
+    };
+    $used{$s->{password}} = 'settings.password' if ($s->{password} // '') =~ /^[A-Za-z0-9]{16}$/;
+    my $i = 0;
+    for my $f (@{$w->{fixed}}) {
+        my $where = 'fixed[' . $i++ . ']';
+        if (!$int->($f->{port}, ($s->{first} // 0) + 1, $s->{last} // 0)) { push @bad, "$where.port: a port of " . (($s->{first} // 0) + 1) . "-" . ($s->{last} // 0) }
+        elsif ($ports{$f->{port}}++) { push @bad, "$where.port: fixed twice" }
+        $key->($f->{key}, "$where.key");
+        push @bad, "$where.name: letters, digits, - and _" if ($f->{name} // '') ne '' && $f->{name} !~ /^[A-Za-z0-9_-]+$/;
+    }
+    $i = 0;
+    for my $r (@{$w->{records}}) {
+        my $where = 'records[' . $i++ . ']';
+        if (($r->{name} // '') !~ /^[A-Za-z0-9_-]+$/) { push @bad, "$where.name: letters, digits, - and _" }
+        elsif ($names{$r->{name}}++) { push @bad, "$where.name: kept twice" }
+        $key->($r->{write}, "$where.write");
+        if (ref $r->{read} ne 'ARRAY') { push @bad, "$where.read: a list of read keys" }
+        else { my $j = 0; $key->($_, "$where.read[" . $j++ . ']') for @{$r->{read}} }
+    }
+    $i = 0;
+    for my $t (@{$w->{reports}}) {
+        my $where = 'reports[' . $i++ . ']';
+        push @bad, "$where: not ✏️<write key>👀<read key>👉<relay>:<port>" unless report_of($t // '');
+    }
+    $i = 0;
+    for my $a (@{$w->{users}}) {
+        my $where = 'users[' . $i++ . ']';
+        my $of = $a->{of} // '';
+        if ($of =~ /^\d+$/) { push @bad, "$where.of: no fixed port $of" unless $ports{$of} }
+        elsif ($of =~ /^@(.+)$/) { push @bad, "$where.of: no record $1" unless $names{$1} }
+        elsif ($of ne 'password') { push @bad, "$where.of: password, a fixed port, or \@record" }
+        $key->($a->{key}, "$where.key");
+        push @bad, "$where.expires: YYYY-MM-DD, its last day, or empty - never" unless ($a->{expires} // '') =~ /^(\d{4}-\d\d-\d\d)?$/;
+        push @bad, "$where.limit: megabytes, 0 - none" unless $int->($a->{limit} // 0, 0, 1e12);
+        push @bad, "$where.direct: true - the direct path only, or false" if ref $a->{direct} || ($a->{direct} // 0) !~ /^[01]$/;
+        push @bad, "$where.name: letters, digits, - and _" if ($a->{name} // '') ne '' && $a->{name} !~ /^[A-Za-z0-9_-]+$/;
+        push @bad, "$where.tags: 8 numbers of 0-255 at most"
+            unless ref($a->{tags} // []) eq 'ARRAY' && @{$a->{tags} // []} <= 8 && !grep { !$int->($_, 0, 255) } @{$a->{tags} // []};
+    }
+    $i = 0;
+    my (%ids, %tagged);
+    for my $t (@{$w->{tags} // []}) {
+        my $where = 'tags[' . $i++ . ']';
+        push @bad, "$where.id: a number of 0-255, once" unless $int->($t->{id}, 0, 255) && !$ids{$t->{id}}++;
+        push @bad, "$where.name: letters, digits, - and _, once" unless ($t->{name} // '') =~ /^[A-Za-z0-9_-]+$/ && !$tagged{$t->{name}}++;
+    }
+    return @bad;
+}
+
+# `adhoc-relay api users [any] <tags>`: the users with each of the tags - or one of them -, and what their meetings carried
+sub api_users {
+    my ($sel) = @_ ? with_tags('with', @_) : ();
+    my ($kb) = counted();
+    return [map { { name => $_->{name}, key => $_->{key}, of => $_->{of}, expires => $_->{expires}, limit => N($_->{limit}),
+        direct => \($_->{direct} ? 1 : 0), tags => [map { N($_) } @{$_->{tags}}], kbytes => N($kb->{$_->{key}} // 0) } } $sel ? users_with(@$sel) : users()];
+}
+
+sub api_set {
+    my $text = do { local $/; <STDIN> } // '';
+    utf8::decode($text);
+    my $given = eval { json_in($text) };
+    api_fail('the input is not JSON: ' . ($@ =~ s/\s+$//r)) unless defined $given;
+    api_fail('the input is not a JSON object') unless ref $given eq 'HASH';
+    my $now = api_get();
+    my %settings = map { my $v = $now->{settings}{$_}; ($_ => ref $v eq 'N' ? $$v : ref $v eq 'SCALAR' ? $$v : $v) } keys %{$now->{settings}};
+    my $plainly = sub { [map { my %x = %$_; $x{port} = ${$x{port}} if ref $x{port}; \%x } @{$_[0]}] };
+    my %want = (
+        settings => { %settings, %{$given->{settings} // {}} },
+        fixed => $given->{fixed} // $plainly->($now->{fixed}),
+        records => $given->{records} // $now->{records},
+        reports => $given->{reports} // $now->{reports},
+        users => $given->{users} // [map { my %x = %$_; $x{limit} = ${$x{limit}} if ref $x{limit}; $x{direct} = ${$x{direct}} if ref $x{direct}; $x{tags} = [map { ref $_ ? $$_ : $_ } @{$x{tags}}]; \%x } @{$now->{users}}],
+        tags => $given->{tags} // [map { { id => ${$_->{id}}, name => $_->{name} } } @{$now->{tags}}],
+    );
+    api_fail('fixed, records, reports, users, tags: each a list') if grep { ref $want{$_} ne 'ARRAY' } qw(fixed records reports users tags);
+    my @bad = api_check(\%want);
+    api_fail(join '; ', @bad) if @bad;
+    my $s = $want{settings};
+    set(uc $_, $s->{$_}) for qw(password first last wait tries block short guesses);
+    set('GUARD', $s->{guard} ? 1 : 0);
+    set('ADDRESS', $s->{address} // '');
+    set('FIXED', join ' ', map { "$_->{port}:$_->{key}" . (($_->{name} // '') ne '' ? ":$_->{name}" : '') } @{$want{fixed}});
+    set('RECORDS', join ' ', map { "$_->{name}:$_->{write}:" . join(',', @{$_->{read}}) } @{$want{records}});
+    set('REPORTS', join ' ', map { pretty(plain($_)) } @{$want{reports}});
+    set('USERS', join ' ', map { user_entry({ %$_, limit => $_->{limit} // 0 }) } @{$want{users}});
+    set('TAGS', join ' ', map { "$_->{id}:$_->{name}" } @{$want{tags}});
+    save();
+    # loaded as `adhoc-relay` loads them: a reload, the meetings going on go on
+    if (systemd()) {
+        my $how = system('systemctl', 'is-active', '--quiet', 'adhoc-relay') == 0 ? 'reload' : 'restart';
+        api_fail("saved, not loaded: systemctl $how adhoc-relay failed - see systemctl status adhoc-relay")
+            if system('systemctl', $how, 'adhoc-relay') != 0;
+    } else {
+        api_fail("saved, not loaded: no systemd here - $LOAD") if system('sh', '-c', $LOAD) != 0;
+    }
+    load();
+    @address = ();
+    print json_out(api_get()), "\n";
+}
+
+sub api {
+    my ($what, @rest) = @_;
+    if (($what // '') eq 'get') { print json_out(api_get()), "\n"; return }
+    if (($what // '') eq 'set') { api_set(); return }
+    if (($what // '') eq 'users') { print json_out(api_users(@rest)), "\n"; return }
+    print STDERR "usage: adhoc-relay api get | set ( JSON on the standard input ) | users [any] <tag>[,<tag>...]\n";
+    exit 2;
+}
+
+my $cmd = shift(@ARGV) // (-t STDIN && -t STDOUT ? 'menu' : 'status');
+if ($cmd =~ /^(help|-h|--help)$/) { help(); exit 0 }
+fail('As root: sudo adhoc-relay ' . join(' ', $cmd eq 'menu' ? () : $cmd, @ARGV)) if $> != 0;
+load();
+if ($cmd eq 'menu') { menu(); exit 0 }
+elsif ($cmd eq 'api') { binmode STDOUT, ':utf8'; api(@ARGV); exit 0 }
+elsif ($cmd eq 'status') { print "\n"; header(); password_note(); status() }
+elsif ($cmd eq 'settings') { settings_show() }
+elsif ($cmd eq 'set') { set_cmd(@ARGV) }
+elsif ($cmd eq 'lines') { lines() }
+elsif ($cmd eq 'password') { password(@ARGV) }
+elsif ($cmd eq 'fixed') { fixed_cmd(@ARGV) }
+elsif ($cmd eq 'record') { record_cmd(@ARGV) }
+elsif ($cmd eq 'report') { report_cmd(@ARGV) }
+elsif ($cmd eq 'address') { address_cmd(@ARGV) }
+elsif ($cmd eq 'user') { user_cmd(@ARGV) }
+elsif ($cmd eq 'tag') { tag_cmd(@ARGV) }
+else { help(); exit 2 }
+print "\n";

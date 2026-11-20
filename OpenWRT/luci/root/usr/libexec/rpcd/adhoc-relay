@@ -1,0 +1,22 @@
+#!/bin/sh
+# AdHoc Relay for the page of LuCI: `ubus call adhoc-relay address | status` - what this router is now, by
+# /usr/libexec/adhoc-relay/state, the same that `adhoc-relay api get` takes; `ubus call adhoc-relay uninstall` - takes AdHoc Relay
+# off the router, this script too: it answers first, and the removal starts a second later, apart from rpcd.
+
+case "$1" in
+list) echo '{ "address": {}, "status": {}, "uninstall": {} }' ;;
+call)
+	case "$2" in
+	address|status) exec /usr/libexec/adhoc-relay/state "$2" ;;
+	uninstall)
+		if [ ! -x /usr/libexec/adhoc-relay/uninstall ]; then
+			echo '{ "started": false }'
+			exit 0
+		fi
+		# its own process, no descriptor of rpcd held: rpcd gets the answer at once
+		( sleep 1; /usr/libexec/adhoc-relay/uninstall ) </dev/null >/dev/null 2>&1 &
+		echo '{ "started": true }'
+		;;
+	esac
+	;;
+esac

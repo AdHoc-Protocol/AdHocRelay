@@ -1,0 +1,12 @@
+/etc/init.d/adhoc-relay
+/etc/rc.d/S95adhoc-relay
+/etc/rc.d/K10adhoc-relay
+/etc/adhoc-relay.used
+/usr/libexec/adhoc-relay/
+/usr/share/adhoc-relay/
+/usr/sbin/adhoc-relay
+/www/luci-static/resources/view/adhoc-relay.js
+/usr/share/luci/menu.d/luci-app-adhoc-relay.json
+/usr/share/rpcd/acl.d/luci-app-adhoc-relay.json
+/usr/libexec/rpcd/adhoc-relay
+/lib/upgrade/keep.d/adhoc-relay

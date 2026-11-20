@@ -1,0 +1,11 @@
+#!/bin/sh
+# AdHoc Relay installed by the page of LuCI alone - System > Backup / Flash Firmware > Restore backup, its archive -, at the first
+# start after it: the settings when there are none, with a new password. The
+# service starts by its links in /etc/rc.d, the archive brings them; the packages it needs come when the router reaches the
+# internet ( needs wait ). OpenWrt runs this once, and erases it as it ends with 0
+[ -f /etc/config/adhoc-relay ] || cp /usr/share/adhoc-relay/adhoc-relay.config /etc/config/adhoc-relay
+if [ -z "$(uci -q get adhoc-relay.main.password)" ]; then
+	uci set adhoc-relay.main.password="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)"
+	uci commit adhoc-relay
+fi
+exit 0

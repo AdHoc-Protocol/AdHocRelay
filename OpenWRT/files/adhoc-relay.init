@@ -1,0 +1,92 @@
+#!/bin/sh /etc/rc.common
+# AdHoc Relay: rules in the kernel, loaded with the values of /etc/config/adhoc-relay, and `give`, which answers the requests for a
+# port, keeps the records and writes the address of this router where its reports say. A change of the settings - LuCI, `uci
+# commit` and `reload_config` - loads them again by the trigger, and procd starts `give` again; the meetings going on go on.
+
+START=95
+STOP=10
+USE_PROCD=1
+
+# the sections fixed and record, as `rules` takes them: "<port>:<key> ..." and "<name>:<write key>:<read key>,... ..."
+fixed_one() {
+	local port key
+	config_get port "$1" port
+	config_get key "$1" key
+	fixed="$fixed $port:$key"
+}
+
+record_one() {
+	local name write read
+	config_get name "$1" name "$1"
+	config_get write "$1" write
+	config_get read "$1" read
+	records="$records $name:$write:$(echo $read | tr ' ' ',')"
+}
+
+# the sections user, as `rules` takes them: "<of>:<key>:<expires>:<limit>:<name> ..." - - for none; the limit of one of the
+# direct path only: direct
+user_one() {
+	local of key expires limit name direct
+	config_get of "$1" of
+	config_get key "$1" key
+	config_get expires "$1" expires
+	config_get limit "$1" limit
+	config_get name "$1" name "$1"
+	config_get_bool direct "$1" direct 0
+	[ "$limit" = 0 ] && limit=
+	[ "$direct" = 1 ] && limit=direct
+	users="$users $of:$key:${expires:--}:${limit:--}:$(echo "$name" | tr ' :' '__')"
+}
+
+start_service() {
+	config_load adhoc-relay
+	local enabled password first last wait tries block guard short guesses fixed= records= users=
+	config_get_bool enabled main enabled 1
+	if [ "$enabled" != 1 ]; then
+		/usr/libexec/adhoc-relay/rules unload
+		return 0
+	fi
+	config_get password main password
+	config_get first main first 40000
+	config_get last main last 49999
+	config_get wait main wait 60
+	config_get tries main tries 5
+	config_get block main block 600
+	config_get_bool guard main guard 1
+	config_get short main short 20
+	config_get guesses main guesses 5
+	config_foreach fixed_one fixed
+	config_foreach record_one record
+	config_foreach user_one user
+	/usr/libexec/adhoc-relay/rules load "$password" "$first" "$last" "$wait" "$tries" "$block" "$guard" "$short" "$guesses" "$fixed" "$records" "$users" 2>&1 | logger -t adhoc-relay
+	# a module of ucode `give` needs is missing - right after the archive of the page is restored, or a firmware flashed -: it is
+	# installed once the router reaches the packages of OpenWrt, and this starts again then
+	if [ -n "$(/usr/libexec/adhoc-relay/needs)" ]; then
+		procd_open_instance needs
+		procd_set_param command /bin/sh /usr/libexec/adhoc-relay/needs wait
+		procd_set_param stderr 1
+		procd_close_instance
+		return 0
+	fi
+	procd_open_instance
+	procd_set_param command /usr/bin/ucode /usr/libexec/adhoc-relay/give.uc
+	# it reads the settings itself: a change of them starts it again, and so does its new code, put by an update
+	procd_set_param file /etc/config/adhoc-relay /usr/libexec/adhoc-relay/give.uc
+	procd_set_param respawn
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	/usr/libexec/adhoc-relay/rules unload
+}
+
+# loading replaces the rules as they are, and procd starts `give` again only when the settings changed: no stop first - it would
+# take the rules away from the meetings going on
+restart() {
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger adhoc-relay
+}

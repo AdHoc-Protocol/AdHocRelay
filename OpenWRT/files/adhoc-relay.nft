@@ -1,0 +1,396 @@
+# AdHoc Relay: the meeting of two TCP connections in the NAT of the router.
+#
+# A side asks for a port of meeting first: the password, 16 characters, and its id - 8 random bytes of its own - to the first port
+# of the range, the port of requests. The program `give` answers there with a port nobody holds, 2 bytes, and gives it to that id:
+# only knocks with it open the port. Not to an address: a NAT that gives the side another address, or another port for each try,
+# keeps the port its own. These rules let only the right password reach `give`, a few a second from an address.
+#
+# The side opens its port of meeting by knocking: one UDP packet to that port, the password and the id - 24 bytes - its whole
+# payload. The first SYN that comes to an open port from an address that knocked there is dropped without a word and remembered;
+# no other address can be the side that waits. Its side keeps knocking and trying -
+# a knock every 20 s, a SYN every second or two, from one source port, so its NAT keeps the same mapping - and so keeps the port
+# open: it closes `wait`
+# seconds after the side gives up. The side knocks from the local port it dials from: a NAT that keeps the port - most do - shows
+# the router one port in both, and the side is known by its address and that port then. Another computer behind its NAT - of
+# the same address - is never taken for it then: it is a client, and waits for the side as any other. A knock of 25 bytes, the password, the id and one byte more, holds the port without opening it:
+# the side that shows its port to a person and waits for a yes. The first SYN from another address is sent to the first side as if from the router
+# itself, from the address that side dials: the two SYNs meet - TCP simultaneous open - and conntrack carries the rest as one
+# connection, in the kernel. The port is closed then; it stays given while its side knocks. A client that comes in the 3 s right
+# after, before the side dials again, is the first side for a moment: the next SYN of the side is sent to it, the other way round,
+# and clients one right after another meet at once. The meetings are these rules: `give` only hands out ports.
+#
+# An address that knocks or asks with a wrong password more than `tries` times - one more try comes back each minute - is blocked
+# for `block` seconds: its knocks and requests go nowhere, the right ones too.
+#
+# The guard against guessing: a meeting the client ends within `short` seconds is short - a password tried and refused, as Remote Desktop
+# or SSH refuses it, is a few kilobytes and a second or two; one who works stays minutes. More than `guesses` short meetings of an
+# address at a port - one more comes back each 10 minutes - and its SYNs to that port go nowhere for `block` seconds: a guesser
+# is stopped, one who mistyped twice is not. The lines that end in `# guard` are the guard: the rules leave them out when it is
+# off, for a server whose meetings are short by nature.
+#
+# A fixed port: a port of the range set aside for one key of 16 characters, never given at random. Its side asks nothing: the key
+# alone - 16 bytes - knocks at that port and opens it, the key and one byte more hold it; the rest is as for any port of meeting.
+#
+# Records: a relay of a changing address ( D ) writes it here: the write key of a record, 16 bytes, to the port of
+# requests - `give` keeps the address the write came from, and answers it. A read key, 16 bytes, to the same port, reads it: `give`
+# answers the address and how old the record is. The ports of D are no news to anyone: its servers have them in their lines. Both
+# are as a request: only a right key reaches `give`, a few a second from an address; a wrong one counts as a wrong password.
+#
+# Calls: a side that knocks with a key of a call - 8 bytes more - lets the clients with that key meet it directly, the traffic
+# not through the router. A client calls at the port of meeting: the key and 30 bytes of where it can be reached. The rules check
+# the key, and send the call on to the side, as from the router, the way a SYN of a meeting goes - no program in it; the answer
+# of the side comes back by conntrack. They dial each other then. `give` answers STUN at the port of requests: a side and a
+# client learn there where the internet sees them.
+#
+# /usr/libexec/adhoc-relay/rules loads this file with the settings: $password ( hex ), $ports ( a range ) and $asks ( its first
+# port ) as variables of nft, @WAIT@, @BLOCK@, @TRIES@, @SHORT@ and @GUESSES@ put in the text ( nft takes no variable there ); then
+# the fixed ports and the keys of the records into their sets.
+
+table ip adhoc_relay {
+    # the ports given, each until its side stops knocking: `give` adds a port here only when it is not here - in the kernel, at
+    # once - so no two sides get one port
+    set given   { type inet_service; flags dynamic, timeout; timeout @WAIT@; }
+    # each port given, with the id it was given to: the 8 bytes after the password, of 16
+    set owned   { typeof udp dport . @ih,128,64; flags dynamic, timeout; timeout @WAIT@; }
+    # each port given, with the addresses that knocked at it with its id: for the page only. A NAT that gives the side another
+    # address adds one more
+    set holder  { typeof udp dport . ip saddr; flags dynamic, timeout; timeout @WAIT@; }
+    # the addresses that ask for ports, each with the requests it may make now
+    set asking  { type ipv4_addr; size 16384; flags dynamic, timeout; timeout 1m; }
+    # the addresses that call, each with the calls it may make now: a count of their own - no program wakes for a call, and the
+    # clients behind one NAT with their server call and ask STUN from one address
+    set calling { type ipv4_addr; size 16384; flags dynamic, timeout; timeout 1m; }
+    # the ports of meeting, opened by a knock for a while
+    set open    { type inet_service; flags dynamic, timeout; timeout @WAIT@; }
+    # the ports where the first side waits
+    set waiting { type inet_service; flags dynamic, timeout; timeout @WAIT@; }
+    # the first side of each port, by its address and source port. The one met leaves it: a second side sent where it was is
+    # dropped then, till the first side's next try says where it is now
+    set seen    { typeof tcp dport . ip saddr . tcp sport; flags dynamic, timeout; timeout @WAIT@; }
+    # each port opened, with the address and the source port of the knock: the first side dials from that port
+    set knocker { typeof tcp dport . ip saddr . tcp sport; flags dynamic, timeout; timeout @WAIT@; }
+    # the ports whose first side came from the port it knocked from, with its address: its NAT keeps the port, and the side is
+    # known by it - another SYN from that address is a client
+    set kept    { typeof tcp dport . ip saddr; flags dynamic, timeout; timeout @WAIT@; }
+    # the addresses that knocked wrong, each with its tries left: `tries` minutes after its last wrong knock an address has them
+    # all again, as one never seen - it is forgotten then. Anyone can knock: the size bounds the memory
+    set wrong   { type ipv4_addr; size 16384; flags dynamic, timeout; timeout @TRIES@m; }
+    # the addresses whose knocks go nowhere
+    set blocked { type ipv4_addr; size 16384; flags dynamic, timeout; timeout @BLOCK@; }
+    # the meetings of the last `short` seconds: the client, its source port, the port of meeting. One that ends while it is here was short
+    set fresh   { typeof ip saddr . tcp sport . tcp dport; size 65535; flags dynamic, timeout; timeout @SHORT@; }
+    # the short meetings of each address at each port, as tries left: past `guesses` it guesses. Forgotten an hour after the last
+    set short   { typeof ip saddr . tcp dport; size 16384; flags dynamic, timeout; timeout 1h; }
+    # the addresses that guess at a port: their SYNs to it go nowhere for `block` seconds
+    set guessing { typeof ip saddr . tcp dport; size 16384; flags dynamic, timeout; timeout @BLOCK@; }
+    # where the first side of each port is: its address and source port. An element of a map can be neither replaced nor deleted
+    # from the packet path: it lives 5 s and its side, trying, adds it anew. A first side that comes again - the same machine
+    # started again - so takes the port over in 5 s at most. Two maps, a port in one at a time - in `first1` while it is in `odd`:
+    # a meeting moves the port to the other, empty since the meeting before, and ends its element in this one - an update with a
+    # timeout of its own sets its end to now. The end is a tick of the kernel later, 1-10 ms: the next first side - its server again,
+    # from its next local port, or a client - is added at once all the same, and a client right after a meeting waits for it alone.
+    # By the types, not by `typeof`: a call, UDP, goes to the first side by these maps too
+    map first0  { type inet_service : ipv4_addr . inet_service; flags dynamic, timeout; timeout 5s; }
+    map first1  { type inet_service : ipv4_addr . inet_service; flags dynamic, timeout; timeout 5s; }
+    # the ports whose first side is of `first1`: each meeting moves its port in or out. A port in it no more held stays, as a
+    # number: 2 bytes each, the range at most
+    set odd     { type inet_service; flags dynamic; }
+    # the address of the router the first side dials, and the port: what it sees the second side come from
+    map back    { type inet_service : ipv4_addr . inet_service; flags dynamic, timeout; timeout 5s; }
+    # the ports met a moment ago: their server dials again at once, from its next local port, and a client that comes before it -
+    # one right after another - waits for it, instead of being dropped and dialing again in 1-3 s
+    set gap     { type inet_service; flags dynamic, timeout; timeout 3s; }
+    # the ports where such a client waits: it is the first side then, of `first` and `seen`, and the next SYN of the server is sent
+    # to it - the meeting the other way round, marked 0x02000000 more
+    set cwait   { type inet_service; flags dynamic, timeout; timeout 5s; }
+    # the meetings of the last day, for the page: the port, the client and its source port, the mark - the number of a user in
+    # it. The newest of a port is when it was used last, and from where. One element a meeting, made as it is set up; past the
+    # size the newer ones are not kept until older ones go
+    set met     { type inet_service . ipv4_addr . inet_service . mark; size 8192; flags dynamic, timeout; timeout 1d; }
+    # the keys of a call, each with its port: a side that knocks with 8 bytes more - its key of a call - lets a client that has
+    # the key call it at that port. The call goes on to the side as it is, from the router; the answer of the side comes back the
+    # same way. What they tell each other is theirs: where each can be reached - its public address, of its LAN, of IPv6 -, and
+    # they dial each other there. The traffic does not pass the router then
+    set calls   { typeof udp dport . @ih,192,64; flags dynamic, timeout; timeout @WAIT@; }
+    # the password, and its users - each until it expires: of the settings
+    set passwords { typeof @ih,0,128; flags timeout; elements = { $password } }
+    # the fixed ports, each with its key, and the users of the key: of the settings
+    set fixed   { typeof udp dport . @ih,0,128; flags timeout; }
+    # the keys that write a record, and those that read one - users of a read key among them: of the settings, each with the port
+    # of requests
+    set writers { typeof udp dport . @ih,0,128; }
+    set readers { typeof udp dport . @ih,0,128; flags timeout; }
+    # The users: keys of 16 the owner gives to others, each in place of the password or of the key of a fixed port, until it
+    # expires; taken away, it opens nothing. A user of a port has a number, 1-255: a knock with it marks the port with the
+    # number - by its chain, of `user_mark` -, and a meeting at the port carries the number in its mark. Its packets are counted by
+    # the quota or the counter of the user, a_<key>, by its chain of `user_count`; past the quota they go nowhere. Only the
+    # meetings of users pay for it: no other packet is looked at, and they alone stay out of the fast path of the kernel. A user
+    # of the direct path only marks the port with one bit more, 0x10000000: no meeting there, only calls
+    map port_user   { type inet_service : mark; flags dynamic, timeout; timeout @WAIT@; }
+    map user_mark   { typeof @ih,0,128 : verdict; flags timeout; }
+    map user_count  { type mark : verdict; flags timeout; }
+
+    # what came in the last 10 minutes, for the page: who - address and source port - to which port of the range. Each kind apart:
+    # a flood of wrong passwords fills its own set, not those of the computers that work
+    # the right requests for a port
+    set t_asked   { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
+    # the knocks and holds with the right password, from the address the port is given to or another
+    set t_knocked { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
+    # the requests and knocks with a wrong password, and those of a blocked address
+    set t_refused { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
+    # the SYNs to the ports given, open or closed
+    set t_dialed  { typeof ip saddr . tcp sport . tcp dport; size 256; flags dynamic, timeout; timeout 10m; }
+    # the writes of a record, and the reads
+    set t_wrote   { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
+    set t_read    { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
+    # the calls of clients with a right key of a call
+    set t_called  { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
+
+    # every packet the router gets passes here: what is no new connection - nearly all of them, the replies to the router and to its
+    # LAN among them - goes on after one test. A knock or a SYN dropped here is never confirmed by conntrack: the next is new again
+    chain meet {
+        type filter hook prerouting priority -150;
+        # the state of the connection looked at once: what is not new goes on at once, but for the end of a meeting
+        ct state != new goto old
+        # what this machine sends itself never knocks: the resolver of Docker, a program of the router - a port of the range by chance
+        iif "lo" return
+        meta l4proto vmap { udp : jump knock, tcp : jump syn }
+    }
+
+    # UDP to a port of the range of the router itself - not what it forwards, from its LAN to a server outside: a request or a
+    # knock. Only a right request goes further, to `give`
+    chain knock {
+        udp dport != $ports return
+        fib daddr type != local return
+        ip saddr @blocked update @t_refused { ip saddr . udp sport . udp dport } drop
+        udp length 32 @ih,0,128 @passwords goto right
+        udp length 33 @ih,0,128 @passwords goto hold
+        # the password, the id and a key of a call: a knock that lets clients with the key meet the side directly
+        udp length 40 @ih,0,128 @passwords goto right_call
+        # the key of a fixed port, at that port: alone it knocks, with one byte more it holds, with a key of a call it knocks and
+        # lets the clients with that key meet the side directly
+        udp length 24 udp dport . @ih,0,128 @fixed goto fixed
+        udp length 25 udp dport . @ih,0,128 @fixed goto fixed_hold
+        udp length 32 udp dport . @ih,0,128 @fixed goto fixed_call
+        # a call of a client, at the port of meeting: a key of a call of that port and 30 bytes of the client - 38. It goes on to
+        # the side, as it is
+        udp length 46 udp dport . @ih,0,64 @calls goto call
+        # a Binding Request of STUN ( RFC 8489 ), no attributes: the magic cookie. `give` answers the address and port it came from
+        udp length 28 udp dport $asks @ih,0,16 0x0001 @ih,16,16 0 @ih,32,32 0x2112a442 goto stun
+        # a write of a record, its write key; a read, a read key
+        udp length 24 udp dport . @ih,0,128 @writers goto record_write
+        udp length 24 udp dport . @ih,0,128 @readers goto record_read
+        # a wrong one: past the tries, its address is blocked
+        update @t_refused { ip saddr . udp sport . udp dport } update @wrong { ip saddr limit rate over 1/minute burst @TRIES@ packets } add @blocked { ip saddr }
+        drop
+    }
+
+    # a packet of a connection there is: those of other connections than meetings and calls pass this at the test of the mark
+    chain old {
+        ct mark & 0x0c000000 != 0 goto marked
+    }
+
+    # a packet of a meeting or of a call. The client ends a meeting - a FIN or a RST of its own: was it short. A side that was
+    # sent a call knocks on, from the port the call came to: its knocks are of the way back of the call for conntrack, and knocks
+    # still here - only its answer, 30 bytes, goes back to the client
+    chain marked {
+        ct mark & 0x0a000000 == 0x08000000 ct direction original tcp flags & (fin | rst) != 0 goto ended # guard
+        # the other way round: the client is of the way back
+        ct mark & 0x0a000000 == 0x0a000000 ct direction reply tcp flags & (fin | rst) != 0 goto ended # guard
+        ct mark & 0x04000000 == 0x04000000 ct direction reply udp length != 38 goto knock
+        # a meeting of a user: counted by its quota or counter. Of a user taken away or expired: nowhere
+        ct mark & 0x00ff0000 vmap @user_count
+        ct mark & 0x00ff0000 != 0 drop
+    }
+
+    # the client ended a meeting while it was fresh: one short meeting more for its address at that port; past the tries it guesses
+    chain ended {
+        ip saddr . tcp sport . tcp dport @fresh delete @fresh { ip saddr . tcp sport . tcp dport } update @short { ip saddr . tcp dport limit rate over 6/hour burst @GUESSES@ packets } add @guessing { ip saddr . tcp dport } # guard
+    }
+
+    # the right password
+    chain right {
+        # a request: to `give`, unless its address asks too often
+        udp dport $asks update @asking { ip saddr limit rate over 3/second burst 5 packets } drop
+        udp dport $asks update @t_asked { ip saddr . udp sport . udp dport } accept
+        update @t_knocked { ip saddr . udp sport . udp dport }
+        # a user, with the id the port was given to: the port is marked with its number
+        udp dport . @ih,128,64 @owned @ih,0,128 vmap @user_mark
+        # a knock with the id the port was given to: the port is opened, or its time renewed - from whatever address. Others open
+        # nothing
+        udp dport . @ih,128,64 @owned update @owned { udp dport . @ih,128,64 } update @holder { udp dport . ip saddr } update @knocker { udp dport . ip saddr . udp sport } update @given { udp dport } update @open { udp dport } drop
+        drop
+    }
+
+    # the password, the id and a key of a call: a knock, and the key let call at this port
+    chain right_call {
+        update @t_knocked { ip saddr . udp sport . udp dport }
+        udp dport . @ih,128,64 @owned @ih,0,128 vmap @user_mark
+        udp dport . @ih,128,64 @owned update @owned { udp dport . @ih,128,64 } update @holder { udp dport . ip saddr } update @knocker { udp dport . ip saddr . udp sport } update @given { udp dport } update @open { udp dport } update @calls { udp dport . @ih,192,64 } drop
+        drop
+    }
+
+    # the password, the id and one byte more: the port is held by its id, not opened
+    chain hold {
+        update @t_knocked { ip saddr . udp sport . udp dport }
+        udp dport . @ih,128,64 @owned update @owned { udp dport . @ih,128,64 } update @holder { udp dport . ip saddr } update @given { udp dport } drop
+        drop
+    }
+
+    # the key of a fixed port: the port is opened, or its time renewed - from whatever address
+    chain fixed {
+        @ih,0,128 vmap @user_mark
+        update @t_knocked { ip saddr . udp sport . udp dport } update @holder { udp dport . ip saddr } update @knocker { udp dport . ip saddr . udp sport } update @given { udp dport } update @open { udp dport } drop
+    }
+
+    # the key of a fixed port and one byte more: the port is held, not opened
+    chain fixed_hold {
+        update @t_knocked { ip saddr . udp sport . udp dport } update @holder { udp dport . ip saddr } update @given { udp dport } drop
+    }
+
+    # the key of a fixed port and a key of a call: a knock, and the key let call at this port
+    chain fixed_call {
+        @ih,0,128 vmap @user_mark
+        update @t_knocked { ip saddr . udp sport . udp dport } update @holder { udp dport . ip saddr } update @knocker { udp dport . ip saddr . udp sport } update @given { udp dport } update @open { udp dport } update @calls { udp dport . @ih,128,64 } drop
+    }
+
+    # a call: unless its address calls too often. The side does not dial now - after a meeting, or gone -: refused at once, the
+    # client meets through the router. Else marked, and sent on to the side by the NAT below, as from the router: its NAT lets it
+    # in as an answer to its knocks
+    chain call {
+        update @calling { ip saddr limit rate over 10/second burst 20 packets } drop
+        update @t_called { ip saddr . udp sport . udp dport }
+        udp dport @odd udp dport != @first1 reject
+        udp dport != @odd udp dport != @first0 reject
+        ct mark set ct mark | 0x04000000 accept
+    }
+
+    # a request of STUN: to `give`, the same count. Its answer is longer than it, 32 bytes to 20: the count keeps it useless to
+    # multiply anyone's traffic
+    chain stun {
+        update @asking { ip saddr limit rate over 3/second burst 5 packets } drop
+        accept
+    }
+
+    # a write or a read of a record: to `give`, unless its address asks too often - the same count as the requests for a port
+    chain record_write {
+        update @asking { ip saddr limit rate over 3/second burst 5 packets } drop
+        update @t_wrote { ip saddr . udp sport . udp dport } accept
+    }
+    chain record_read {
+        update @asking { ip saddr limit rate over 3/second burst 5 packets } drop
+        update @t_read { ip saddr . udp sport . udp dport } accept
+    }
+
+    # a SYN to an open port of meeting of the router itself
+    chain syn {
+        tcp flags & (syn | ack) != syn return
+        # noted for the page, open port or closed, when it is given: a SYN to a port nobody holds is of the scanners of the
+        # internet, that dial every port of every address, and is no news
+        tcp dport @given fib daddr type local update @t_dialed { ip saddr . tcp sport . tcp dport }
+        tcp dport != @open tcp dport != @gap return
+        fib daddr type != local return
+        # the first side from the port it knocked from: its NAT keeps the port - the side is known by it from now on
+        tcp dport . ip saddr . tcp sport @knocker update @kept { tcp dport . ip saddr }
+        # a client waits for the server: its own SYN again is remembered, as of a first side; one from the address of the server is
+        # the server - it meets the client, the other way round
+        tcp dport @cwait tcp dport . ip saddr . tcp sport @seen goto remember
+        tcp dport @cwait tcp dport . ip saddr @holder goto reversed
+        # the first side again: its time renewed; where it is - added, when that ran out
+        tcp dport . ip saddr . tcp sport @seen update @seen { tcp dport . ip saddr . tcp sport } update @waiting { tcp dport } goto remember
+        # the first side, come from the port it knocked from - after a meeting, from its next one: it waits, whoever waited before
+        tcp dport . ip saddr . tcp sport @knocker add @waiting { tcp dport } add @seen { tcp dport . ip saddr . tcp sport } goto remember
+        # an address that guesses at this port: nowhere as the second side. The first side is never stopped so: a client behind its
+        # NAT that guesses has its address
+        tcp dport @waiting ip saddr . tcp dport @guessing drop # guard
+        # the second side: its connection is marked - for the NAT and for the forward chain of fw4. The port closes once the NAT sends
+        # it on to the first side
+        tcp dport @waiting add @fresh { ip saddr . tcp sport . tcp dport } # guard
+        tcp dport @waiting tcp dport @port_user ct mark set tcp dport map @port_user
+        # a user of the direct path only: its clients reach its server by a call, never through the router - a reset at once, the
+        # client knows it then. Nothing of it is ever relayed
+        tcp dport @waiting ct mark & 0x10000000 == 0x10000000 reject with tcp reset
+        tcp dport @waiting ct mark set ct mark | 0x08000000 accept
+        # a client right after a meeting, before the server dials again: it waits for the server. Not one of the address of the
+        # server: that may be the server itself, its SYN come before its knock
+        tcp dport @gap tcp dport != @cwait tcp dport . ip saddr != @holder goto early
+        # a client behind the NAT of a first side known by its port, come when nobody waits: it waits for nobody, and dials again
+        tcp dport . ip saddr @kept drop
+        # the first side: an address that knocked at this port - with its id, or with its key -, remembered, dropped. Anyone else
+        # waits for nobody: a client that comes before its server dials again in a second or three, and meets it then; a stranger
+        # never takes the place of the server
+        tcp dport . ip saddr @holder add @waiting { tcp dport } add @seen { tcp dport . ip saddr . tcp sport } goto remember
+        drop
+    }
+
+    # where the first side of the port is, and the address of the router it dials: of the map of the port now. Dropped, remembered
+    chain remember {
+        tcp dport @odd add @first1 { tcp dport : ip saddr . tcp sport } add @back { tcp dport : ip daddr . tcp dport } drop
+        add @first0 { tcp dport : ip saddr . tcp sport } add @back { tcp dport : ip daddr . tcp dport } drop
+    }
+
+    # a client come right after a meeting, before its server dials again: it is the first side now, dropped and remembered as
+    # a server is - one at a time. Of a user of the direct path only: a reset, as always
+    chain early {
+        ip saddr . tcp dport @guessing drop # guard
+        tcp dport @port_user ct mark set tcp dport map @port_user
+        ct mark & 0x10000000 == 0x10000000 reject with tcp reset
+        add @fresh { ip saddr . tcp sport . tcp dport } # guard
+        add @cwait { tcp dport } add @seen { tcp dport . ip saddr . tcp sport } goto remember
+    }
+
+    # the server dials while a client waits: the second side is the server - sent to the client, as from the router
+    chain reversed {
+        tcp dport @port_user ct mark set tcp dport map @port_user
+        ct mark set ct mark | 0x0a000000 accept
+    }
+
+    # before the NAT of fw4 ( dstnat, srcnat ): its masquerade of the WAN must not take the meeting first
+    chain to_first {
+        type nat hook prerouting priority -101;
+        ct mark & 0x08000000 == 0x08000000 tcp dport @odd dnat ip to tcp dport map @first1
+        ct mark & 0x08000000 == 0x08000000 tcp dport != @odd dnat ip to tcp dport map @first0
+        # where the first side is ran out a moment ago, and its next try adds it anew: the SYN of the second side is dropped,
+        # unanswered. It comes again in a second or three, and meets then
+        ct mark & 0x08000000 == 0x08000000 drop
+        # a call: to where the side dials from - it knocks from there too. Gone a moment ago: the client calls again
+        meta l4proto udp ct mark & 0x04000000 == 0x04000000 udp dport @odd dnat ip to udp dport map @first1
+        meta l4proto udp ct mark & 0x04000000 == 0x04000000 udp dport != @odd dnat ip to udp dport map @first0
+        meta l4proto udp ct mark & 0x04000000 == 0x04000000 drop
+    }
+
+    # after the NAT of fw4 has sent the second side on: to a first side that waits - of `seen`. The one met before stays in `first`
+    # till its time runs out; the SYN sent there is dropped, unanswered, and comes again when the first side's next try is there
+    chain to_waiting {
+        type filter hook prerouting priority -90;
+        ct mark & 0x08000000 == 0x08000000 ct state new ct original proto-dst . ip daddr . tcp dport != @seen drop
+    }
+
+    # the second side met the first: the port is closed, the first side leaves `seen`, the port its map of `first` - its element
+    # there ends now -, and the second side comes from the address the first dials. A client may wait for the next one a moment
+    chain as_router {
+        type nat hook postrouting priority 99;
+        meta l4proto tcp ct mark & 0x08000000 == 0x08000000 ct status dnat goto met
+        # a call: from the address and the port of meeting the side knocks at; the port stays open
+        meta l4proto udp ct mark & 0x04000000 == 0x04000000 ct status dnat snat ip to ct original proto-dst map @back
+        meta l4proto udp ct mark & 0x04000000 == 0x04000000 ct status dnat snat ip to ct original ip daddr : ct original proto-dst
+    }
+
+    # a meeting, as it is set up: noted with its client - of the way back, met the other way round -, the port closed, the first
+    # side forgotten, the port in its other map
+    chain met {
+        ct mark & 0x02000000 == 0 add @met { ct original proto-dst . ct original ip saddr . ct original proto-src . ct mark }
+        ct mark & 0x02000000 == 0x02000000 delete @cwait { ct original proto-dst } add @met { ct original proto-dst . ct reply ip saddr . ct reply proto-src . ct mark }
+        delete @open { ct original proto-dst } delete @waiting { ct original proto-dst } delete @seen { ct original proto-dst . ct reply ip saddr . ct reply proto-src } add @gap { ct original proto-dst }
+        ct original proto-dst @odd update @first1 { ct original proto-dst timeout 1ms : 0.0.0.0 . 0 } delete @odd { ct original proto-dst } goto mirror
+        update @first0 { ct original proto-dst timeout 1ms : 0.0.0.0 . 0 } add @odd { ct original proto-dst } goto mirror
+    }
+
+    # the second side, as from the address and the port the first one dials. `back` is added, not renewed: it ends 5 s after the
+    # first side noted it, and its next try adds it anew - fresh when the address of the router changes. A meeting in the moment
+    # between: from the address and the port the second side dialed - the same, but for a first side of the LAN of the router
+    chain mirror {
+        meta l4proto tcp snat ip to ct original proto-dst map @back
+        meta l4proto tcp snat ip to ct original ip daddr : ct original proto-dst
+    }
+}

@@ -1,0 +1,32 @@
+#!/bin/sh
+# Takes AdHoc Relay off this router completely: its rules, its service, its page in LuCI, its settings - every file it installed.
+# The button Uninstall of its page runs it, and `sh install.sh remove`. Meetings going on end with their rules.
+
+# the rules and the service first: nothing of them stays in the kernel
+/etc/init.d/adhoc-relay stop >/dev/null 2>&1
+/etc/init.d/adhoc-relay disable >/dev/null 2>&1
+[ -x /usr/libexec/adhoc-relay/rules ] && /usr/libexec/adhoc-relay/rules unload
+nft delete table ip adhoc_relay 2>/dev/null
+nft delete table ip adhoc_relay_fast 2>/dev/null
+
+# installed as packages of OpenWrt: the package manager takes them away, as it knows them
+if command -v apk >/dev/null; then
+	for p in luci-app-adhoc-relay adhoc-relay; do apk info -e "$p" >/dev/null 2>&1 && apk del "$p" >/dev/null 2>&1; done
+elif command -v opkg >/dev/null; then
+	for p in luci-app-adhoc-relay adhoc-relay; do opkg status "$p" 2>/dev/null | grep -q installed && opkg remove "$p" >/dev/null 2>&1; done
+fi
+
+# every file, whichever way it came
+rm -rf /usr/libexec/adhoc-relay /usr/share/adhoc-relay /tmp/adhoc-relay /etc/adhoc-relay.used
+rm -f /etc/init.d/adhoc-relay /etc/rc.d/*adhoc-relay /etc/config/adhoc-relay \
+	/usr/share/nftables.d/chain-pre/forward/30-adhoc-relay.nft \
+	/www/luci-static/resources/view/adhoc-relay.js /usr/share/luci/menu.d/luci-app-adhoc-relay.json \
+	/usr/share/rpcd/acl.d/luci-app-adhoc-relay.json /usr/libexec/rpcd/adhoc-relay /usr/sbin/adhoc-relay \
+	/lib/upgrade/keep.d/adhoc-relay /etc/uci-defaults/90-adhoc-relay
+
+# LuCI and rpcd forget the page; fw4 drops the include of the meetings
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null
+/etc/init.d/rpcd reload >/dev/null 2>&1
+[ -n "$(nft list tables 2>/dev/null | grep 'inet fw4')" ] && fw4 -q reload
+logger -t adhoc-relay "AdHoc Relay is removed"
+echo "AdHoc Relay is removed, its settings too"

@@ -1,0 +1,14 @@
+{
+	"admin/services/adhoc-relay": {
+		"title": "AdHoc Relay",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "adhoc-relay"
+		},
+		"depends": {
+			"acl": [ "luci-app-adhoc-relay" ],
+			"uci": { "adhoc-relay": true }
+		}
+	}
+}

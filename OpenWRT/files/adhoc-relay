@@ -1,0 +1,332 @@
+#!/usr/bin/ucode
+// AdHoc Relay on this router, for a program that sets it up from afar - over SSH, as the page of LuCI does it by hand:
+//   adhoc-relay api get    everything as JSON: the release, the settings, the fixed ports, the records, the reports, and what it
+//                          does now ( `state` - the same the page shows )
+//   adhoc-relay api set    reads JSON from the standard input - the parts to change: `settings`, `fixed`, `records`, `reports`,
+//                          `users`, `tags`; a
+//                          part left out stays as it is, a part given replaces it whole - checks it all, writes /etc/config/adhoc-relay
+//                          and loads it: the meetings going on go on. Answers as `api get`; `{ "error": ... }` and the code 1 when
+//                          something is wrong - nothing written then.
+// The same JSON as `adhoc-relay api` of a Linux computer: a program needs not know which of the two the relay is. The form of it
+// is in the README, section API.
+
+import { cursor } from 'uci';
+import * as fs from 'fs';
+
+const CONF = 'adhoc-relay';
+const KEY = /^[A-Za-z0-9]{16}$/;
+const NAME = /^[A-Za-z0-9_-]+$/;
+const HOST = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+// ✏ 👀 👉 and what makes an emoji coloured, as the bytes of UTF-8
+const PEN = '\xe2\x9c\x8f', EYES = '\xf0\x9f\x91\x80', ARROW = '\xf0\x9f\x91\x89', VS16 = '\xef\xb8\x8f';
+
+function out(o) {
+	print(sprintf('%J\n', o));
+}
+
+function fail(why) {
+	out({ error: why });
+	exit(1);
+}
+
+// the output of a command of this router, parsed as JSON; null when it gives none
+function json_of(cmd) {
+	let p = fs.popen(cmd, 'r');
+	if (!p)
+		return null;
+	let text = p.read('all');
+	p.close();
+	try { return json(text); } catch (e) { return null; }
+}
+
+// A line of a report as people see it: the signs of the keyboard ! ? > made ✏️ 👀 👉, and plain: those, what makes an emoji
+// coloured left out
+function plain(t) {
+	t = trim(t ?? '');
+	t = replace(t, VS16, '');
+	t = replace(t, PEN, '!');
+	t = replace(t, EYES, '?');
+	t = replace(t, ARROW, '>');
+	return t;
+}
+function pretty(t) {
+	t = replace(t, '!', PEN + VS16);
+	t = replace(t, '?', EYES);
+	return replace(t, '>', ARROW);
+}
+// ✏️<write key>[👀<read key>]👉<relay>:<port>
+const REPORT = /^!([A-Za-z0-9]{16})(\?([A-Za-z0-9]{16}))?>([^\s:@=,!?>]+):([0-9]+)$/;
+
+function release() {
+	return trim(fs.readfile('/usr/share/adhoc-relay/version') ?? '') || null;
+}
+
+function settings(c) {
+	let s = c.get_all(CONF, 'main') ?? {};
+	return {
+		enabled: s.enabled != '0',
+		password: s.password ?? '',
+		first: +(s.first ?? 40000),
+		last: +(s.last ?? 49999),
+		wait: +(s.wait ?? 60),
+		tries: +(s.tries ?? 5),
+		block: +(s.block ?? 600),
+		guard: s.guard != '0',
+		short: +(s.short ?? 20),
+		guesses: +(s.guesses ?? 5),
+		address: s.dns ?? ''
+	};
+}
+
+function sections(c, type) {
+	let all = [];
+	c.foreach(CONF, type, (s) => push(all, s));
+	return all;
+}
+
+function get() {
+	let c = cursor();
+	c.load(CONF);
+	return {
+		api: 1,
+		system: 'openwrt',
+		release: release(),
+		settings: settings(c),
+		fixed: map(sections(c, 'fixed'), (s) => ({ port: +s.port, key: s.key ?? '', name: s.name ?? '' })),
+		records: map(sections(c, 'record'), (s) => ({ name: s.name ?? s['.name'], write: s.write ?? '', read: type(s.read) == 'array' ? s.read : (s.read ? split(s.read, ' ') : []) })),
+		reports: map(sections(c, 'report'), (s) => s.to ?? ''),
+		users: map(sections(c, 'user'), (s) => ({ name: s.name ?? '', key: s.key ?? '', of: s.of ?? '', expires: s.expires ?? '', limit: +(s.limit ?? 0),
+			direct: s.direct == '1', tags: map(type(s.tags) == 'array' ? s.tags : (s.tags ? split(s.tags, ' ') : []), (t) => +t) })),
+		tags: map(sections(c, 'tag'), (s) => ({ id: +s.id, name: s.name ?? '' })),
+		state: {
+			...(json_of('/usr/libexec/adhoc-relay/state status') ?? { running: false }),
+			...(json_of('/usr/libexec/adhoc-relay/state address') ?? {})
+		}
+	};
+}
+
+// The tags of a user as one number of 8 bytes, a tag each: sorted, the last repeated to fill the 8; -1 - none. A selection
+// compares bytes, nothing else
+function packed(tags) {
+	let t = sort(uniq(tags ?? []), (a, b) => a - b), n = 0;
+	if (!length(t))
+		return -1;
+	for (let i = 0; i < 8; i++)
+		n = (n << 8) | t[i < length(t) ? i : length(t) - 1];
+	return n;
+}
+function has(n, tag) {
+	if (n == -1)
+		return false;
+	for (let i = 0; i < 64; i += 8)
+		if (((n >> i) & 255) == tag)
+			return true;
+	return false;
+}
+
+// The users that have the tags wanted - each of them, or with `any` one of them -, with what their meetings carried:
+// `adhoc-relay api users [any] <tag>[,<tag>...]`, a tag by its number or its name
+function users_with(args) {
+	let all = get(), any = args[0] == 'any';
+	if (any)
+		args = slice(args, 1);
+	let ids = {};
+	for (let t in all.tags)
+		ids[t.name] = t.id;
+	let want = [];
+	for (let w in split(join(',', args), ','))
+		if (w != '') {
+			let id = match(w, /^[0-9]+$/) ? +w : ids[w];
+			if (id == null || id < 0 || id > 255)
+				fail(`no tag ${w}`);
+			push(want, id);
+		}
+	let carried = {};
+	for (let a in all.state.users ?? [])
+		carried[a.key] = a;
+	let out = [];
+	for (let a in all.users) {
+		let n = packed(a.tags), ok = !length(want) || (any ? length(filter(want, (w) => has(n, w))) > 0 : length(filter(want, (w) => !has(n, w))) == 0);
+		if (ok)
+			push(out, { ...a, kbytes: carried[a.key]?.kbytes ?? 0 });
+	}
+	return out;
+}
+
+function int_in(v, lo, hi) {
+	return type(v) == 'int' && v >= lo && v <= hi;
+}
+
+// What `set` is given, merged into what there is and checked as `rules load` and the page check it: the list of what is wrong
+function check(want) {
+	let s = want.settings, bad = [];
+	if (!match(s.password, KEY))
+		push(bad, 'settings.password: 16 letters and digits');
+	if (!int_in(s.first, 1, 65534) || !int_in(s.last, s.first + 1, 65535))
+		push(bad, 'settings.first, settings.last: ports, the first below the last');
+	for (let k in [ 'wait', 'tries', 'block', 'short', 'guesses' ])
+		if (!int_in(s[k], 0, 86400))
+			push(bad, `settings.${k}: a whole number, 0 or more`);
+	if (s.address != '' && !match(s.address, HOST))
+		push(bad, 'settings.address: a name in DNS, an IPv4 address, or empty - found');
+	let used = {}, ports = {};
+	let key = (k, where) => {
+		if (!match(k, KEY))
+			push(bad, `${where}: 16 letters and digits`);
+		else if (used[k])
+			push(bad, `${where}: the same key as ${used[k]}`);
+		else
+			used[k] = where;
+	};
+	if (match(s.password, KEY))
+		used[s.password] = 'settings.password';
+	for (let i, f in want.fixed) {
+		let where = `fixed[${i}]`;
+		if (!int_in(f.port, s.first + 1, s.last))
+			push(bad, `${where}.port: a port of ${s.first + 1}-${s.last}`);
+		else if (ports[f.port])
+			push(bad, `${where}.port: fixed twice`);
+		ports[f.port] = true;
+		key(f.key, `${where}.key`);
+		if ((f.name ?? '') != '' && !match(f.name, NAME))
+			push(bad, `${where}.name: letters, digits, - and _`);
+	}
+	let names = {};
+	for (let i, r in want.records) {
+		let where = `records[${i}]`;
+		if (!match(r.name ?? '', NAME))
+			push(bad, `${where}.name: letters, digits, - and _`);
+		else if (names[r.name])
+			push(bad, `${where}.name: kept twice`);
+		names[r.name] = true;
+		key(r.write, `${where}.write`);
+		if (type(r.read) != 'array')
+			push(bad, `${where}.read: a list of read keys`);
+		else
+			for (let j, k in r.read)
+				key(k, `${where}.read[${j}]`);
+	}
+	for (let i, t in want.reports) {
+		let m = match(plain(t), REPORT);
+		if (!m || +m[5] < 1 || +m[5] > 65535)
+			push(bad, `reports[${i}]: not ✏️<write key>👀<read key>👉<relay>:<port>`);
+	}
+	for (let i, a in want.users) {
+		let where = `users[${i}]`, of = `${a.of ?? ''}`;
+		if (match(of, /^[0-9]+$/)) {
+			if (!ports[+of])
+				push(bad, `${where}.of: no fixed port ${of}`);
+		} else if (substr(of, 0, 1) == '@') {
+			if (!names[substr(of, 1)])
+				push(bad, `${where}.of: no record ${substr(of, 1)}`);
+		} else if (of != 'password')
+			push(bad, `${where}.of: password, a fixed port, or @record`);
+		key(a.key, `${where}.key`);
+		if (!match(a.expires ?? '', /^([0-9]{4}-[0-9]{2}-[0-9]{2})?$/))
+			push(bad, `${where}.expires: YYYY-MM-DD, its last day, or empty - never`);
+		if (!int_in(a.limit ?? 0, 0, 1000000000))
+			push(bad, `${where}.limit: megabytes, 0 - none`);
+		if (!(a.direct in [ null, true, false ]))
+			push(bad, `${where}.direct: true - the direct path only, or false`);
+		if ((a.name ?? '') != '' && !match(a.name, NAME))
+			push(bad, `${where}.name: letters, digits, - and _`);
+		if (type(a.tags ?? []) != 'array' || length(a.tags ?? []) > 8 || length(filter(a.tags ?? [], (t) => !int_in(t, 0, 255))))
+			push(bad, `${where}.tags: 8 numbers of 0-255 at most`);
+	}
+	let ids = {};
+	for (let i, t in want.tags) {
+		if (!int_in(t.id, 0, 255) || ids[t.id])
+			push(bad, `tags[${i}].id: a number of 0-255, once`);
+		ids[t.id] = true;
+		if (!match(t.name ?? '', NAME))
+			push(bad, `tags[${i}].name: letters, digits, - and _`);
+	}
+	return bad;
+}
+
+function set() {
+	let given;
+	try { given = json(fs.stdin.read('all')); } catch (e) { fail('the input is not JSON'); }
+	if (type(given) != 'object')
+		fail('the input is not a JSON object');
+	let now = get();
+	let want = {
+		settings: { ...now.settings, ...(given.settings ?? {}) },
+		fixed: given.fixed ?? now.fixed,
+		records: given.records ?? now.records,
+		reports: given.reports ?? now.reports,
+		users: given.users ?? now.users,
+		tags: given.tags ?? now.tags
+	};
+	if (type(want.users) != 'array' || type(want.tags) != 'array')
+		fail('users, tags: each a list');
+	let bad = check(want);
+	if (length(bad))
+		fail(join('; ', bad));
+
+	let c = cursor();
+	c.load(CONF);
+	let s = want.settings;
+	c.set(CONF, 'main', 'enabled', s.enabled ? '1' : '0');
+	for (let k in [ 'password', 'first', 'last', 'wait', 'tries', 'block', 'short', 'guesses' ])
+		c.set(CONF, 'main', k, `${s[k]}`);
+	c.set(CONF, 'main', 'guard', s.guard ? '1' : '0');
+	c.set(CONF, 'main', 'dns', s.address);
+	// the lists anew, each in the order given
+	for (let t in [ 'fixed', 'record', 'report', 'user', 'tag' ])
+		for (let x in sections(c, t))
+			c.delete(CONF, x['.name']);
+	for (let f in want.fixed) {
+		let n = c.add(CONF, 'fixed');
+		c.set(CONF, n, 'port', `${f.port}`);
+		c.set(CONF, n, 'key', f.key);
+		if ((f.name ?? '') != '')
+			c.set(CONF, n, 'name', f.name);
+	}
+	for (let r in want.records) {
+		let n = c.add(CONF, 'record');
+		c.set(CONF, n, 'name', r.name);
+		c.set(CONF, n, 'write', r.write);
+		c.set(CONF, n, 'read', r.read);
+	}
+	for (let t in want.reports) {
+		let n = c.add(CONF, 'report');
+		c.set(CONF, n, 'to', pretty(plain(t)));
+	}
+	for (let a in want.users) {
+		let n = c.add(CONF, 'user');
+		c.set(CONF, n, 'of', `${a.of}`);
+		c.set(CONF, n, 'key', a.key);
+		if ((a.name ?? '') != '')
+			c.set(CONF, n, 'name', a.name);
+		if ((a.expires ?? '') != '')
+			c.set(CONF, n, 'expires', a.expires);
+		if (a.direct)
+			c.set(CONF, n, 'direct', '1');
+		else if ((a.limit ?? 0) > 0)
+			c.set(CONF, n, 'limit', `${a.limit}`);
+		if (length(a.tags ?? []))
+			c.set(CONF, n, 'tags', map(uniq(a.tags), (t) => `${t}`));
+	}
+	for (let t in want.tags) {
+		let n = c.add(CONF, 'tag');
+		c.set(CONF, n, 'id', `${t.id}`);
+		c.set(CONF, n, 'name', t.name);
+	}
+	c.commit(CONF);
+	// loaded as the page loads them: no stop first - it would take the rules away from the meetings going on
+	system('/etc/init.d/adhoc-relay restart >/dev/null 2>&1');
+	out(get());
+}
+
+let args = ARGV;
+if (args[0] != 'api' || !(args[1] in [ 'get', 'set', 'users' ])) {
+	warn('usage: adhoc-relay api get | set ( JSON on the standard input ) | users [any] <tag>[,<tag>...]\n');
+	exit(2);
+}
+if (args[1] == 'get')
+	out(get());
+else if (args[1] == 'users')
+	out(users_with(slice(args, 2)));
+else
+	set();

@@ -1,0 +1,13 @@
+{
+	"luci-app-adhoc-relay": {
+		"description": "Grant access to AdHoc Relay",
+		"read": {
+			"ubus": { "adhoc-relay": [ "address", "status" ] },
+			"uci": [ "adhoc-relay" ]
+		},
+		"write": {
+			"ubus": { "adhoc-relay": [ "uninstall" ] },
+			"uci": [ "adhoc-relay" ]
+		}
+	}
+}
