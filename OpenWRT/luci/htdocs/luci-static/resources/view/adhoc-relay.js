@@ -17,8 +17,11 @@
 // is copied; on the router whose IP changes, On my public IP change, notify the following relays, the line pasted, Add. Each Add saves and applies at once.
 
 var callAddress = rpc.declare({ object: 'adhoc-relay', method: 'address' });
-var callStatus = rpc.declare({ object: 'adhoc-relay', method: 'status' });
+// what the router does now; `meetings` and `tries` - whether to make those parts: the costly ones, asked for only while shown
+var callStatus = rpc.declare({ object: 'adhoc-relay', method: 'status', params: [ 'meetings', 'tries' ] });
 var callUninstall = rpc.declare({ object: 'adhoc-relay', method: 'uninstall' });
+// an address blocked let in again; `port` - where it was blocked for guessing, 0 - blocked at every port
+var callUnblock = rpc.declare({ object: 'adhoc-relay', method: 'unblock', params: [ 'address', 'port' ] });
 
 // the colours of the states: on the dark and the light themes alike
 var GOOD = '#2e9e5b', WARN = '#e8a33a', BAD = '#d9534f', INFO = '#4a9fd8';
@@ -53,10 +56,14 @@ function uninstall() {
 
 // 16 letters and digits, those that are not mistaken for one another when read aloud or typed
 function newPassword() {
-	var abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789', bytes = new Uint8Array(16), out = '';
-	window.crypto.getRandomValues(bytes);
-	for (var i = 0; i < 16; i++)
-		out += abc.charAt(bytes[i] % abc.length);
+	var abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789', bytes = new Uint8Array(24), out = '';
+	// each sign as likely as another: a byte past the last whole run of the signs is thrown away, not folded onto the first ones
+	var whole = 256 - 256 % abc.length;
+	while (out.length < 16) {
+		window.crypto.getRandomValues(bytes);
+		for (var i = 0; i < bytes.length && out.length < 16; i++)
+			if (bytes[i] < whole) out += abc.charAt(bytes[i] % abc.length);
+	}
 	return out;
 }
 
@@ -68,26 +75,16 @@ function copyText(text) {
 }
 
 function copyBySelection(text) {
-	var t = E('textarea', { 'style': 'position:fixed; top:0; left:0; opacity:0' });
+	// read only: a phone opens no keyboard for it; its range set too - select() alone selects nothing on iOS
+	var t = E('textarea', { 'readonly': 'readonly', 'style': 'position:fixed; top:0; left:0; opacity:0' });
 	t.value = text;
 	document.body.appendChild(t);
 	t.select();
+	try { t.setSelectionRange(0, text.length); } catch (e) {}
 	var ok = false;
 	try { ok = document.execCommand('copy'); } catch (e) {}
 	document.body.removeChild(t);
 	return ok;
-}
-
-// a button that copies `text()`, and says so a moment
-function copyButton(label, text, style) {
-	return E('button', { 'class': 'btn ' + (style || 'cbi-button-action'), 'click': function(ev) {
-		var button = ev.currentTarget, t = text();
-		if (!t) return;
-		return copyText(t).then(function(ok) {
-			button.textContent = ok ? _('Copied ✓') : _('Not copied: press Show, select the line and copy it');
-			window.setTimeout(function() { button.textContent = label; }, 2000);
-		});
-	} }, label);
 }
 
 function bytesText(n) {
@@ -129,7 +126,6 @@ function portState(p) {
 var tryWords = {
 	'request': _('Asked for a port'),
 	'knock': _('Knock by the server of the port'),
-	'stranger': _('Knock at a port held by another server'),
 	'wrong': _('Wrong password or key'),
 	'blocked': _('Ignored: a blocked address'),
 	'guessing': _('Ignored: it guessed passwords at this port'),
@@ -139,13 +135,6 @@ var tryWords = {
 	'read': _('A server looked up an IP'),
 	'call': _('A client called the server, to meet it directly')
 };
-
-// a key of the settings: 16 letters or digits, and not the password
-function keyValid(value) {
-	if (!/^[A-Za-z0-9]{16}$/.test(value))
-		return _('Exactly 16 letters or digits');
-	return value != uci.get('adhoc-relay', 'main', 'password') || _('Not the password: a key of its own');
-}
 
 function first() { return +(uci.get('adhoc-relay', 'main', 'first') || 40000); }
 function last() { return +(uci.get('adhoc-relay', 'main', 'last') || 49999); }
@@ -161,9 +150,11 @@ function plain(t) {
 // the line a report writes to: ✏️<write key>[👀<read key>]👉<relay>:<its port>, as the page of that relay copies it; null - no
 // such line
 function parseTo(to) {
-	var m = /^!([A-Za-z0-9]{16})(?:\?([A-Za-z0-9]{16}))?>([^\s:@=,!?>]+):(\d{1,5})$/.exec(plain(to));
+	// the relay: a name or an address, of what names are made of - as `give` and the command of a Linux computer take it. Its
+	// port as a number: with zeros in front it would not be the one `give` says its answers came from
+	var m = /^!([A-Za-z0-9]{16})(?:\?([A-Za-z0-9]{16}))?>([A-Za-z0-9][A-Za-z0-9._-]*):(\d{1,5})$/.exec(plain(to));
 	if (!m || +m[4] < 1 || +m[4] > 65535) return null;
-	return { write: m[1], read: m[2], host: m[3], port: m[4] };
+	return { write: m[1], read: m[2], host: m[3], port: String(+m[4]) };
 }
 
 // the line of a report as it is kept and shown
@@ -201,16 +192,6 @@ function tagsOf(s) {
 	return L.toArray(s.tags).map(Number);
 }
 
-// tags typed - numbers or the names of the tags, commas or spaces between: their numbers; null - one is no tag
-function tagIds(text) {
-	var names = {};
-	uci.sections('adhoc-relay', 'tag').forEach(function(t) { names[t.name] = +t.id; });
-	var ids = String(text || '').split(/[\s,]+/).filter(function(w) { return w != ''; }).map(function(w) {
-		return /^\d+$/.test(w) && +w <= 255 ? +w : names[w] != null ? names[w] : null;
-	});
-	return ids.indexOf(null) >= 0 ? null : ids;
-}
-
 // the tags of a user as one number of 8 bytes, a tag each - sorted, the last repeated to fill the 8 -, as two halves of 32 bits:
 // JavaScript counts exactly to 53 bits only. A selection compares bytes, nothing else
 function packed(tags) {
@@ -240,9 +221,17 @@ function table(head) {
 	]);
 }
 
-// a box that stands out: a line to copy, a step to do; its colour on the left
-function box(children, colour) {
-	return E('div', { 'style': 'border:1px solid rgba(127,127,127,.35); border-left:4px solid ' + (colour || 'rgba(127,127,127,.35)') + '; border-radius:6px; padding:.8em 1em; margin:.6em 0 1em' }, children);
+// The rows of a table. A name, an address, a line - whatever the settings or the router say - is text, never HTML: a word alone
+// in a cell would be taken for HTML, so it goes there as a node of text
+function rows(target, data, none) {
+	cbi_update_table(target, data.map(function(r) {
+		return r.map(function(c) { return typeof c == 'string' ? document.createTextNode(c) : c; });
+	}), none);
+}
+
+// a dialog; its title is text too
+function modal(title, children) {
+	ui.showModal([ String(title) ], children);
 }
 
 // a line or an address: whole, as it is - the text never taken for HTML
@@ -250,13 +239,14 @@ function mono(text) {
 	return E('code', { 'style': 'font-size:1.05em; word-break:break-all; user-select:all' }, [ document.createTextNode(text) ]);
 }
 
-// a command to type: not cut inside a word
-function command(text) {
-	return E('code', { 'style': 'white-space:nowrap; user-select:all' }, [ document.createTextNode(text) ]);
+function quiet(text) {
+	return E('span', { 'style': 'opacity:.7' }, [ text ]);
 }
 
-function quiet(text) {
-	return E('span', { 'style': 'opacity:.7' }, text);
+// the day of today, YYYY-MM-DD, by the clock of this computer
+function today() {
+	var d = new Date(), p = function(n) { return (n < 10 ? '0' : '') + n; };
+	return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
 }
 
 // the details of something, in a tooltip: an ⓘ beside it - the page shows the names, the details when asked
@@ -266,11 +256,23 @@ function tip(text) {
 
 // a note under something: plain, or a warning
 function hint(text, warn) {
-	return E('div', { 'class': warn ? 'alert-message warning' : 'cbi-section-descr', 'style': 'margin:.6em 0 0' }, text);
+	return E('div', { 'class': warn ? 'alert-message warning' : 'cbi-section-descr', 'style': 'margin:.6em 0 0' }, [].concat(text));
 }
 
 function said(where, text) {
-	dom.content(where, E('div', { 'class': 'alert-message warning', 'style': 'margin-top:.6em' }, text));
+	dom.content(where, E('div', { 'class': 'alert-message warning', 'style': 'margin-top:.6em' }, [ text ]));
+}
+
+// words that tell a time since: they change by themselves, in their place - nothing around them is made anew for it
+var living = [];
+function live(words) {
+	var s = E('span', {}, [ words() ]);
+	living.push([ s, words ]);
+	return s;
+}
+function relive() {
+	living = living.filter(function(l) { return l[0].isConnected; });
+	living.forEach(function(l) { var t = l[1](); if (l[0].textContent != t) l[0].textContent = t; });
 }
 
 // a small button, beside the others of a row
@@ -292,10 +294,10 @@ function smallCopy(text, title) {
 	return b;
 }
 
-// a moment some seconds ago, by the clock of this computer: 12:34:56 today, the day before it else
-function clockOf(ago) {
-	if (ago == null) return '-';
-	var d = new Date(Date.now() - ago * 1000), p = function(n) { return (n < 10 ? '0' : '') + n; };
+// a moment, by the clock of this computer: 12:34:56 today, the day before it else
+function clockOf(moment) {
+	if (moment == null) return '-';
+	var d = new Date(moment), p = function(n) { return (n < 10 ? '0' : '') + n; };
 	var t = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 	return d.toDateString() == new Date().toDateString() ? t : p(d.getDate()) + '.' + p(d.getMonth() + 1) + ' ' + t;
 }
@@ -306,7 +308,7 @@ function select(value, options, change) {
 	if (!options.some(function(o) { return String(o[0]) == value; }))
 		options = options.concat([ [ value, value ] ]);
 	return E('select', { 'class': 'cbi-input-select', 'change': change }, options.map(function(o) {
-		return E('option', { 'value': o[0], 'selected': String(o[0]) == value ? 'selected' : null }, o[1]);
+		return E('option', { 'value': o[0], 'selected': String(o[0]) == value ? 'selected' : null }, [ String(o[1]) ]);
 	}));
 }
 
@@ -320,7 +322,7 @@ function row(label, field, note) {
 // a dialog with fields; `ok()` saves and applies - its message of what is wrong, or a promise
 function dialog(title, fields, okLabel, ok) {
 	var wrong = E('div');
-	ui.showModal(title, fields.concat([ wrong, E('div', { 'class': 'right' }, [
+	modal(title, fields.concat([ wrong, E('div', { 'class': 'right' }, [
 		E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
 		E('button', { 'class': 'btn cbi-button-positive', 'click': function() {
 			var r = ok();
@@ -339,14 +341,14 @@ var LIMITS = [ [ '', _('No limit') ], [ '100', '100 MB' ], [ '1024', '1 GB' ], [
 function step(n, done, children) {
 	return E('li', { 'style': 'display:flex; gap:.6em; align-items:baseline; margin:.4em 0' + (done ? '; opacity:.65' : '') }, [
 		E('span', { 'style': 'flex:none; width:1.5em; height:1.5em; line-height:1.5em; border-radius:50%; text-align:center; font-weight:bold; color:#fff; background:' + (done ? GOOD : INFO) }, done ? '✓' : String(n)),
-		E('div', { 'style': 'flex:1; min-width:0' }, children)
+		E('div', { 'style': 'flex:1; min-width:0' }, [].concat(children))
 	]);
 }
 
 return view.extend({
 	load: function() {
 		// the settings: the forms load them themselves. The public address comes later: finding it may take seconds
-		return Promise.all([ L.resolveDefault(callStatus(), {}), uci.load('adhoc-relay') ]);
+		return Promise.all([ L.resolveDefault(callStatus(true, false), {}), uci.load('adhoc-relay') ]);
 	},
 
 	// the address of this router for the lines: the name in DNS its owner set, else its public address - of its wan, or found by
@@ -362,17 +364,17 @@ return view.extend({
 		return uci.sections('adhoc-relay', 'report').map(function(s) { return parseTo(s.to); }).filter(function(r) { return r && r.read; });
 	},
 
-	// the lines for the server, of the settings saved, as `adhoc-relay lines` makes them: the password's, <password>👉<address>:<first
-	// port>👉 - an answer comes -; then one of each fixed port, <key>👉<address>:<port>, and the line of its client. When this router
-	// reports its address, with a read key, to relays of fixed address, each line looks it up there - its address changes:
-	// <password or key>🌐<read key>👉<relay>:<its port>🌐…🌐<the port here>, the reports in order.
-	// Each line: its id, its title, the line, the line as shown - the password or key hidden -, the line of the client, notes; the
-	// line is null while something of it is missing
-	lineOf: function(secret, ask, port) {
+	// The line for the server, of the settings saved, as `adhoc-relay lines` makes it: <key>👉<address>:<first port>👉 - of the
+	// password, of a fixed port, of a user, all alike: the server binds its port at the first port with the key, and the router
+	// answers the port - any free one, or the fixed one of the key. When this router reports its address, with a read key, to
+	// relays of fixed address, each line looks it up there - its address changes:
+	// <key>🌐<read key>👉<relay>:<its port>🌐…🌐<the first port here>👉, the reports in order. null while something of it is missing
+	lineOf: function(secret) {
+		var port = first();
 		if (!secret || !port) return null;
 		var address = this.address(), reads = this.reports().map(function(r) { return r.read + ARROW + r.host + ':' + r.port; }).join(GLOBE);
 		var where = reads ? GLOBE + reads + GLOBE + port : address ? ARROW + address + ':' + port : null;
-		return where ? secret + where + (ask ? ARROW : '') : null;
+		return where ? secret + where + ARROW : null;
 	},
 
 	// what the lines lack, in words: no address of this router; an IP that changes, its line of a relay with no read key; '' - nothing
@@ -384,25 +386,34 @@ return view.extend({
 	},
 
 	// a new key - the password, or the key of a fixed port: asked first, as each server of it needs its new line then
-	newKey: function(what, set) {
+	newKey: function(what, set, where) {
 		var page = this;
-		ui.showModal(_('A new key for %s').format(what), [
+		modal(_('A new key for %s').format(what), [
 			E('p', _('The old one opens nothing from now on: each server that knocks with it needs its new line, copied after this.')),
 			E('div', { 'class': 'right' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
-				E('button', { 'class': 'btn cbi-button-negative', 'click': function() { ui.hideModal(); set(newPassword()); return page.apply(page.portsSaid); } }, _('New key'))
+				E('button', { 'class': 'btn cbi-button-negative', 'click': function() { ui.hideModal(); set(newPassword()); return page.apply(where || page.portsSaid); } }, _('New key'))
 			])
 		]);
+	},
+
+	// the moment a port was used last, as it was shown first: each poll tells it in whole seconds ago, a second sooner or later
+	// by the clock of this computer - the same moment must not look like another one
+	moment: function(u) {
+		var now = Date.now() - u.ago * 1000, was = this.usedAt[u.port];
+		if (was == null || Math.abs(now - was) > 2500) this.usedAt[u.port] = was = now;
+		return was;
 	},
 
 	// a fixed port added, or its name and port changed: its port of the free ones of the range - from the first + 1000 on, easy to
 	// remember -, its key made by itself
 	fixedDialog: function(s) {
 		var page = this, taken = {}, ports = [];
-		uci.sections('adhoc-relay', 'fixed').forEach(function(x) { if (x !== s) taken[x.port] = true; });
+		// by its section: the settings give each of them anew at every asking, never the same one twice
+		uci.sections('adhoc-relay', 'fixed').forEach(function(x) { if (!s || x['.name'] != s['.name']) taken[x.port] = true; });
 		for (var p = Math.min(first() + 1000, last()); p <= last() && ports.length < 50; p++)
 			if (!taken[p]) ports.push([ String(p), String(p) ]);
-		for (var q = first() + 1; q < first() + 1000 && ports.length < 60; q++)
+		for (var q = first() + 1; q < Math.min(first() + 1000, last()) && ports.length < 60; q++)
 			if (!taken[q]) ports.push([ String(q), String(q) ]);
 		var name = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': s ? (s.name || '') : '', 'placeholder': _('such as office-rdp') });
 		var port = select(s ? s.port : ports[0] && ports[0][0], ports);
@@ -426,9 +437,9 @@ return view.extend({
 	// a fixed port taken away, its users with it
 	dropFixed: function(s) {
 		var page = this, users = uci.sections('adhoc-relay', 'user').filter(function(a) { return a.of == s.port; });
-		ui.showModal(_('Fixed port %s').format(s.port), [
-			E('p', users.length ? _('Port %s is fixed no more: its key and its %d users open nothing from now on.').format(s.port, users.length) :
-				_('Port %s is fixed no more: its key opens nothing from now on.').format(s.port)),
+		modal(_('Fixed port %s').format(s.port), [
+			E('p', [ users.length ? _('Port %s is fixed no more: its key and its %d users open nothing from now on.').format(s.port, users.length) :
+				_('Port %s is fixed no more: its key opens nothing from now on.').format(s.port) ]),
 			E('div', { 'class': 'right' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
 				E('button', { 'class': 'btn cbi-button-negative', 'click': function() {
@@ -467,21 +478,22 @@ return view.extend({
 		(st.ports || []).forEach(function(p) { held[p.port] = p; });
 		var number = function(port) {
 			var p = held[port];
-			return p ? E('span', { 'title': portState(p) + ' · ' + _('free in %s unless its server knocks').format(nftSpan(p.free)), 'style': 'cursor:help' }, String(port)) : String(port);
+			return p ? E('span', { 'title': portState(p) + ' · ' + _('free in %s unless its server knocks').format(nftSpan(p.free)), 'style': 'cursor:help' }, [ String(port) ]) : String(port);
 		};
-		var sig = JSON.stringify([ given.map(function(p) { var u = used[p.port]; return [ p.port, marked[p.port], u && clockOf(u.ago), u && u.from, active[p.port], portState(p) ]; }),
-			fixed.map(function(s) { var u = used[s.port], h = held[s.port]; return [ s.name, s.port, s.key, u && clockOf(u.ago), u && u.from, u && u.user, active[s.port], h && portState(h) ]; }),
+		var when = function(u) { return u ? clockOf(page.moment(u)) : '-'; };
+		var sig = JSON.stringify([ given.map(function(p) { var u = used[p.port]; return [ p.port, marked[p.port], when(u), u && u.from, active[p.port], portState(p) ]; }),
+			fixed.map(function(s) { var u = used[s.port], h = held[s.port]; return [ s.name, s.port, s.key, when(u), u && u.from, u && u.user, active[s.port], h && portState(h) ]; }),
 			this.lineOf('x', true, 1), this.linesNote() ]);
 		if (sig === this.portsSig) return;
 		this.portsSig = sig;
-		cbi_update_table(this.givenTable, given.map(function(p) {
+		rows(this.givenTable, given.map(function(p) {
 			var u = used[p.port];
-			return [ marked[p.port] || quiet('—'), number(p.port), u ? clockOf(u.ago) : '-', u ? u.from : '-', on(p.port) ];
+			return [ marked[p.port] || quiet('—'), number(p.port), when(u), u ? u.from : '-', on(p.port) ];
 		}), E('em', _('No server holds a port now')));
-		cbi_update_table(this.fixedTable, fixed.map(function(s) {
+		rows(this.fixedTable, fixed.map(function(s) {
 			var u = used[s.port];
-			return [ E('a', { 'href': '#', 'title': _('Name and port'), 'click': function(ev) { ev.preventDefault(); page.fixedDialog(s); } }, s.name || quiet(_('(no name)'))),
-				number(s.port), u ? clockOf(u.ago) : '-', u ? u.from : '-', u && u.user ? u.user : '', on(s.port),
+			return [ E('a', { 'href': '#', 'title': _('Name and port'), 'click': function(ev) { ev.preventDefault(); page.fixedDialog(s); } }, [ s.name || quiet(_('(no name)')) ]),
+				number(s.port), when(u), u ? u.from : '-', u && u.user ? u.user : '', on(s.port),
 				E('span', { 'style': 'white-space:nowrap' }, [
 					smallCopy(function() { return page.lineOf(s.key, false, s.port); }, _('The line of its server')),
 					small(_('New key'), function() { page.newKey(_('fixed port %s').format(s.port), function(k) { uci.set('adhoc-relay', s['.name'], 'key', k); }); }),
@@ -517,22 +529,38 @@ return view.extend({
 			// its address is the one the relay of fixed IP saw last: the servers look that one up
 			if (answered && answered.seen)
 				address = answered.seen;
-			ip = [ address ? mono(address) : '', address ? ' ' : '', quiet(answered ? _('changes · reported to %s, %s').format(reports.map(function(s) { var r = parseTo(s.to); return r ? r.host : '?'; }).join(', '), agoText(answered.answered))
-				: _('changes · not reported yet')), ' ', link(_('Details'), 'address') ];
+			var hosts = reports.map(function(s) { var r = parseTo(s.to); return r ? r.host : '?'; }).join(', ');
+			// how long ago: told anew by itself, the card is not made anew for it
+			var newest = function() {
+				var a = (page.st.reports || []).filter(function(r) { return r.answered != null; }).sort(function(x, y) { return x.answered - y.answered; })[0];
+				return a ? _('changes · reported to %s, %s').format(hosts, agoText(a.answered)) : _('changes · not reported yet');
+			};
+			ip = [ address ? mono(address) : '', address ? ' ' : '', E('span', { 'style': 'opacity:.7' }, [ live(newest) ]), ' ', link(_('Details'), 'address') ];
 		} else if (address) {
 			ip = [ mono(address), ' ', quiet(dns ? _('fixed · DNS name') : _('fixed · found automatically')), ' ', link(_('It changes?'), 'address') ];
 		} else {
 			ip = [ E('span', { 'style': 'color:' + WARN }, _('Not found.')), ' ', link(_('Set a DNS name'), 'settings') ];
 		}
-		var given = (st.ports || []).length, met = (st.meetings || []).length;
+		// the connections there are: one being set up, or closed and not forgotten by the kernel yet, is none
+		var given = st.ports_all != null ? st.ports_all : (st.ports || []).length, met = (st.meetings || []).filter(function(m) { return m.state == 'ESTABLISHED'; }).length;
+		// made anew only when something of it changes: what is selected in it, to copy, stays selected
+		var sig = JSON.stringify([ !!st.running, !!st.giving, st.missing, st.failed, !!password, enabled, address, dns, this.found, given, met,
+			reports.map(function(s) { return s.to; }), records.map(function(s) { return s.name; }),
+			(st.reports || []).map(function(r) { return [ r.to, r.answered != null, r.seen ]; }),
+			(st.records || []).map(function(r) { return r.name; }), first(), last() ]);
+		if (sig === this.routerSig) return;
+		this.routerSig = sig;
 		var facts = [
 			[ _('Public IP'), ip ],
 			[ _('Ports'), [ String(first()), ' ', quiet(_('takes the requests')), ' · ', '%d-%d'.format(first() + 1, last()), ' ', quiet(_('go to servers')) ] ],
 			st.running ? [ _('Now'), [ given == 1 ? _('1 port held') : _('%d ports held').format(given), ' · ', met == 1 ? _('1 connection') : _('%d connections').format(met), ' ', link(_('Details'), 'ports') ] ] : null,
-			records.length ? [ _('Tracks the public IP of'), [ records.map(function(s) {
-				var w = (st.records || []).filter(function(r) { return r.name == s.name; })[0];
-				return s.name + ' ' + (w ? _('(%s)').format(agoText(w.ago)) : _('(no report yet)'));
-			}).join(', '), ' ', link(_('Details'), 'address') ] ] : null
+			records.length ? [ _('Tracks the public IP of'), records.reduce(function(all, s, i) {
+				var since = function() {
+					var w = (page.st.records || []).filter(function(r) { return r.name == s.name; })[0];
+					return w ? _('(%s)').format(agoText(w.ago)) : _('(no report yet)');
+				};
+				return all.concat([ (i ? ', ' : '') + s.name + ' ', live(since) ]);
+			}, []).concat([ ' ', link(_('Details'), 'address') ]) ] : null
 		].filter(function(f) { return f; });
 
 		// until it serves: the steps there, each with its button
@@ -565,6 +593,8 @@ return view.extend({
 				E('div', { 'style': 'margin-bottom:.6em' }, [ E('span', { 'style': 'color:' + colour + '; font-size:1.2em' }, '● ') ].concat(state)),
 				E('div', { 'style': 'display:grid; grid-template-columns:max-content 1fr; gap:.35em 1.5em; align-items:baseline' },
 					facts.reduce(function(all, f) { return all.concat([ E('span', { 'style': 'opacity:.7' }, f[0]), E('span', {}, f[1]) ]); }, [])),
+				// the last load of the rules failed: what runs is not of the settings there are
+				st.failed ? hint([ _('The settings are not applied: %s').format(st.failed), tip(_('The rules of AdHoc Relay did not load with the settings there are: the rules of before run on, or none. The log of the router - Status > System Log, adhoc-relay - has what was said. Correct the settings and save them again.')) ], true) : '',
 				this.found.wan && running ? hint(_('This router is behind another router or the NAT of its provider: its WAN address is %s. Forward the ports %d-%d, TCP and UDP, to it there.').format(this.found.wan, first(), last()), true) : '',
 				steps
 			])
@@ -585,7 +615,18 @@ return view.extend({
 		if (f) f.style.display = this.tab == 'settings' ? '' : 'none';
 	},
 
+	// the tab shown now
+	shownTab: function() {
+		var li = document.querySelector('.cbi-tabmenu li.cbi-tab');
+		return (li && li.getAttribute('data-tab')) || 'ports';
+	},
+
 	update: function(st) {
+		// a part not asked for this time stays as it was
+		var was = this.st || {}, page = this;
+		if (st.meetings == null) st.meetings = was.meetings;
+		if (st.ports == null) { st.ports = was.ports; st.used = was.used; st.marked = was.marked; }
+		if (st.tries == null) { st.tries = was.tries; st.tries_all = was.tries_all; }
 		this.st = st;
 		this.showRouter();
 		this.showPorts();
@@ -593,14 +634,44 @@ return view.extend({
 		this.showReports();
 		this.showUsers();
 		this.showTags();
-		var blocked = st.blocked || [], tries = st.tries || [];
+		relive();
+		var blocked = st.blocked || [];
 		this.blockedBox.style.display = blocked.length ? '' : 'none';
-		this.blockedCount.textContent = ' (' + blocked.length + ')';
-		cbi_update_table(this.blocked, blocked.map(function(b) {
-			return [ b.address, b.port ? _('Guessed passwords at port %d: blocked at that port only').format(b.port) : _('Wrong passwords or keys: blocked at every port'), nftSpan(b.ends) ];
-		}), E('em', _('No address is blocked')));
-		this.triesNote.textContent = (st.tries_all > tries.length) ? _('The newest %d of %d.').format(tries.length, st.tries_all) : '';
-		cbi_update_table(this.tries, tries.map(function(t) {
+		// the list has the first of them: how many there are in all
+		this.blockedCount.textContent = ' (' + (st.blocked_all != null ? st.blocked_all : blocked.length) + ')';
+		if (blocked.length || this.hadBlocked)
+			rows(this.blocked, blocked.map(function(b) {
+				return [ b.address, b.port ? _('Guessed passwords at port %d: blocked at that port only').format(b.port) : _('Wrong passwords or keys: blocked at every port'), nftSpan(b.ends),
+					small(_('Unblock'), function() { return L.resolveDefault(callUnblock(b.address, b.port || 0), null).then(function() { if (page.fresh) return page.fresh(); }); },
+						null, _('Let it in again now: its count of wrong ones is forgotten too')) ];
+			}), E('em', _('No address is blocked')));
+		this.hadBlocked = blocked.length > 0;
+		this.showTries();
+	},
+
+	// The last 10 minutes: off unless turned on here - the router notes nothing then, and each note is work for it. Its rows
+	// only while it is open: folded, nothing is made of them. On or off as the settings say: the rules load a moment after
+	showTries: function() {
+		if (!this.triesBox.open) return;
+		var page = this, st = this.st, tries = st.tries || [], on = uci.get('adhoc-relay', 'main', 'log') == '1';
+		var more = on && st.tries_all > tries.length ? _('The newest %d of %d.').format(tries.length, st.tries_all) : '';
+		// made anew only when it changes: a button drawn again under a click would lose it
+		var sig = on + '|' + more;
+		if (sig !== this.triesSig) {
+			this.triesSig = sig;
+			dom.content(this.triesNote, [ more ? more + ' ' : '', quiet(on ? _('On: turn it off when done.') : _('Off: nothing is noted.')), ' ',
+				small(on ? _('Turn off') : _('Turn on'), function() {
+					uci.set('adhoc-relay', 'main', 'log', on ? '0' : '1');
+					return Promise.resolve(page.apply(page.portsSaid)).then(function() {
+						page.showTries();
+						// the rules load a moment after the settings are applied: what they note is asked for then
+						window.setTimeout(function() { if (page.fresh) page.fresh(); }, 3000);
+					});
+				}) ]);
+		}
+		this.tries.style.display = on ? '' : 'none';
+		if (!on) return;
+		rows(this.tries, tries.map(function(t) {
 			return [ agoText(t.ago), t.from, t.port, tryWords[t.what] || t.what ];
 		}), E('em', _('Nothing in the last 10 minutes')));
 	},
@@ -608,7 +679,7 @@ return view.extend({
 	// a section taken away at once, asked first: `what` in words
 	drop: function(id, what, after, where) {
 		var page = this;
-		ui.showModal(what, [
+		modal(what, [
 			E('p', _('Take it away?')),
 			E('div', { 'class': 'right' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
@@ -625,9 +696,14 @@ return view.extend({
 	// the routers whose addresses this one keeps: each its line to copy, when it reported last
 	showKept: function() {
 		var st = this.st, page = this;
-		var rows = uci.sections('adhoc-relay', 'record').map(function(s) {
+		var sig = JSON.stringify([ (st.records || []).map(function(r) { return [ r.name, r.address ]; }), uci.sections('adhoc-relay', 'record').map(function(s) { return [ s.name, page.recordLine(s) ]; }) ]);
+		if (sig === this.keptSig) return;
+		this.keptSig = sig;
+		var list = uci.sections('adhoc-relay', 'record').map(function(s) {
 			var w = (st.records || []).filter(function(r) { return r.name == s.name; })[0];
-			return [ E('strong', {}, s.name || '?'), w ? w.address : E('em', {}, _('no report yet: paste its line there')), w ? agoText(w.ago) : '-',
+			// how long ago it reported: told anew in its place, the row - its buttons - stays
+			var since = function() { var n = (page.st.records || []).filter(function(r) { return r.name == s.name; })[0]; return n ? agoText(n.ago) : '-'; };
+			return [ E('strong', {}, [ s.name || '?' ]), w ? w.address : E('em', {}, _('no report yet: paste its line there')), live(since),
 				E('span', { 'style': 'white-space:nowrap' }, [
 					smallCopy(function() { return page.recordLine(s); }, _('Its line: paste it on that router, under On my public IP change, notify the following relays')),
 					small('✕', function() {
@@ -638,25 +714,24 @@ return view.extend({
 					}, 'negative', _('Keep it no more'))
 				]) ];
 		});
-		var sig = JSON.stringify([ (st.records || []), uci.sections('adhoc-relay', 'record').map(function(s) { return [ s.name, page.recordLine(s) ]; }) ]);
-		if (sig === this.keptSig) return;
-		this.keptSig = sig;
-		cbi_update_table(this.keptTable, rows, E('em', _('None yet')));
+		rows(this.keptTable, list, E('em', _('None yet')));
 	},
 
 	// whom this router reports its own address to: the answers
 	showReports: function() {
 		var st = this.st, page = this;
-		var rows = uci.sections('adhoc-relay', 'report').map(function(s) {
-			var r = parseTo(s.to) || {}, now = (st.reports || []).filter(function(x) { return x.to == r.host + ':' + r.port; })[0];
-			return [ r.host ? r.host + ':' + r.port : s.to, r.read ? _('yes') : E('span', { 'style': 'color:' + WARN }, _('no: the line has no read key')),
-				now && now.answered != null ? agoText(now.answered) : _('no answer yet'), now && now.seen ? now.seen : '-',
-				small('✕', function() { page.drop(s['.name'], _('Reporting to %s').format(r.host || s.to)); }, 'negative', _('Report to it no more')) ];
-		});
-		var sig = JSON.stringify([ st.reports || [], uci.sections('adhoc-relay', 'report').map(function(s) { return s.to; }) ]);
+		var sig = JSON.stringify([ (st.reports || []).map(function(r) { return [ r.to, r.seen ]; }), uci.sections('adhoc-relay', 'report').map(function(s) { return s.to; }) ]);
 		if (sig === this.reportsSig) return;
 		this.reportsSig = sig;
-		cbi_update_table(this.reportsTable, rows, E('em', _('Nobody: for the servers the IP of this router does not change')));
+		var list = uci.sections('adhoc-relay', 'report').map(function(s) {
+			var r = parseTo(s.to) || {}, to = r.host + ':' + r.port, now = (st.reports || []).filter(function(x) { return x.to == to; })[0];
+			// when it answered last: told anew in its place, the row stays
+			var since = function() { var n = (page.st.reports || []).filter(function(x) { return x.to == to; })[0]; return n && n.answered != null ? agoText(n.answered) : _('no answer yet'); };
+			return [ r.host ? to : String(s.to || ''), r.read ? _('yes') : E('span', { 'style': 'color:' + WARN }, _('no: the line has no read key')),
+				live(since), now && now.seen ? now.seen : '-',
+				small('✕', function() { page.drop(s['.name'], _('Reporting to %s').format(r.host || s.to)); }, 'negative', _('Report to it no more')) ];
+		});
+		rows(this.reportsTable, list, E('em', _('Nobody: for the servers the IP of this router does not change')));
 	},
 
 	// the line of a user for the server it is given to: as the line of the password or of its fixed port, with the user in place
@@ -696,7 +771,7 @@ return view.extend({
 		};
 		direct.addEventListener('change', shown);
 		shown();
-		var until = E('input', { 'class': 'cbi-input-text', 'type': 'date', 'value': s ? (s.expires || '') : '', 'min': new Date().toISOString().substr(0, 10) });
+		var until = E('input', { 'class': 'cbi-input-text', 'type': 'date', 'value': s ? (s.expires || '') : '', 'min': today() });
 		var tags = new ui.Dropdown(s ? L.toArray(s.tags) : [], t.choices, { multiple: true, create: true, optional: true, sort: true,
 			select_placeholder: _('none'), custom_placeholder: _('a number of 0-255…'), validate: function(v) { return /^\d+$/.test(v) && +v <= 255 || _('A number of 0-255'); } });
 		dialog(s ? _('User %s').format(s.name || '') : _('A user'), [
@@ -704,12 +779,18 @@ return view.extend({
 			row(_('Using'), of, _('What its key opens: any free port, as the password does; a fixed port, as its key does; the IP of a record, as its read key does')),
 			row(_('Until'), until, _('Its last day; empty - always')),
 			row(_('Direct only'), E('label', {}, [ direct, ' ', _('Traffic can be passed via a direct connection only') ])),
-			row(_('Limit'), limit, _('What its meetings may carry through this router')),
+			row(_('Limit'), limit, _('What its meetings may carry through this router. A limit is more work for the router: it counts every packet of the meetings of this user, and they stay out of its fast path. No limit: nothing is counted.')),
 			row(_('Tags'), tags.render(), _('8 at most: choose, or type a number'))
 		], s ? _('Save') : _('Add'), function() {
 			var chosen = L.toArray(tags.getValue()).map(Number).filter(function(v, i, a) { return v >= 0 && v <= 255 && a.indexOf(v) == i; });
 			if (!/^[A-Za-z0-9_-]*$/.test(name.value)) return _('A name of letters, digits, - and _');
 			if (chosen.length > 8) return _('8 tags at most');
+			// the firewall carries every connection past the count while its offloading is on: a limit set then would limit nothing
+			if (limit.value && !direct.checked && !/^@/.test(of.value) && page.st.flow_offloading)
+				return _('A limit does not hold while Software flow offloading of the firewall is on. Turn it off in Network > Firewall, then set the limit.');
+			// a user of a port has a number of 1-255: one more would be left out by the rules, and open nothing
+			if (!/^@/.test(of.value) && uci.sections('adhoc-relay', 'user').filter(function(a) { return !/^@/.test(a.of || '') && (!s || a['.name'] != s['.name']); }).length >= 255)
+				return _('255 users of ports at most');
 			var id = s ? s['.name'] : uci.add('adhoc-relay', 'user');
 			if (!s) uci.set('adhoc-relay', id, 'key', newPassword());
 			uci.set('adhoc-relay', id, 'name', name.value || null);
@@ -733,25 +814,32 @@ return view.extend({
 			.sort(function(a, b) { return (a.name || '￿').localeCompare(b.name || '￿'); });
 		var ofText = {};
 		this.ofChoices().forEach(function(o) { ofText[o[0]] = o[1]; });
-		var rows = this.shown.map(function(s) {
+		var list = this.shown.map(function(s) {
 			var c = carried[s.key], read = /^@/.test(s.of || '');
 			var over = c && c.limit != null && c.kbytes >= c.limit * 1024;
-			var used = read ? '-' : s.direct == '1' ? _('direct only') : E('span', over ? { 'style': 'color:' + BAD } : {}, (bytesText((c ? c.kbytes : 0) * 1024) || '0 B') + (s.limit ? ' / ' + bytesText(s.limit * 1048576) : ''));
-			var expired = s.expires && s.expires < new Date().toISOString().substr(0, 10);
-			return [ E('a', { 'href': '#', 'click': function(ev) { ev.preventDefault(); page.userDialog(s); } }, s.name || quiet(_('(no name)'))),
-				ofText[s.of] || s.of || '?', expired ? E('span', { 'style': 'color:' + BAD }, s.expires) : (s.expires || _('always')), used,
+			// counted of a user with a limit alone
+			var used = read || (s.direct != '1' && !(+s.limit > 0)) ? '-' : s.direct == '1' ? _('direct only') : E('span', over ? { 'style': 'color:' + BAD } : {}, [ (bytesText((c ? c.kbytes : 0) * 1024) || '0 B') + (s.limit ? ' / ' + bytesText(s.limit * 1048576) : '') ]);
+			var expired = s.expires && s.expires < today();
+			return [ E('a', { 'href': '#', 'click': function(ev) { ev.preventDefault(); page.userDialog(s); } }, [ s.name || quiet(_('(no name)')) ]),
+				String(ofText[s.of] || s.of || '?'), expired ? E('span', { 'style': 'color:' + BAD }, [ s.expires ]) : String(s.expires || _('always')), used,
 				tagsOf(s).map(function(n) { return names[n] || n; }).join(', ') || '-',
 				E('span', { 'style': 'white-space:nowrap' }, [
 					smallCopy(function() { return page.userLine(s) || s.key; }, read ? _('The key') : _('The line of its server')),
-					small(_('New key'), function() { page.newKey(_('the user %s').format(s.name || ''), function(k) { uci.set('adhoc-relay', s['.name'], 'key', k); }); }),
+					small(_('New key'), function() { page.newKey(_('the user %s').format(s.name || ''), function(k) { uci.set('adhoc-relay', s['.name'], 'key', k); }, page.userSaid); }),
 					small('✕', function() { page.drop(s['.name'], _('The user %s').format(s.name || ''), null, page.userSaid); }, 'negative', _('Take it away: it opens nothing'))
 				]) ];
 		});
+		// the offloading of the firewall carries the meetings of users past their count: said here, where a limit is set and read
+		if (!!st.offloading !== this.offloadingSaid) {
+			this.offloadingSaid = !!st.offloading;
+			dom.content(this.usersNote, st.offloading ? hint([ _('Limits do not hold: Software flow offloading of the firewall is on.'),
+				tip(_('The firewall of the router carries every connection on its own fast path, past the count of AdHoc Relay: what the meetings of the users with a limit carry is not counted, the limit does not stop them, and such a user taken away keeps the meetings it has. Turn it off in Network > Firewall: the other meetings have the fast path of AdHoc Relay then.')) ], true) : '');
+		}
 		var sig = JSON.stringify([ want, any, st.users || [], this.shown.map(function(s) { return [ s.name, s.of, s.expires, s.limit, s.direct, s.tags, s.key, page.userLine(s) ]; }), ofText ]);
 		this.dropShown.disabled = want.length && this.shown.length ? null : 'disabled';
 		if (sig === this.userSig) return;
 		this.userSig = sig;
-		cbi_update_table(this.userTable, rows, E('em', want.length ? _('No user has these tags') : _('None yet: Add a user')));
+		rows(this.userTable, list, E('em', want.length ? _('No user has these tags') : _('None yet: Add a user')));
 	},
 
 	// the names of the tags: each a number and its name, taken away by ✕; one more by a number not named yet and a name
@@ -773,7 +861,8 @@ return view.extend({
 			}) : [ quiet(_('No tag is named yet')) ]),
 			E('div', { 'style': 'display:flex; flex-wrap:wrap; gap:.5em; align-items:center' }, [ number, name, E('button', { 'class': 'btn cbi-button-add', 'click': function() {
 				if (!/^[A-Za-z0-9_-]+$/.test(name.value) || /^\d+$/.test(name.value)) return said(page.userSaid, _('A name of letters, digits, - and _, not a number'));
-				if (tags.some(function(t) { return t.name == name.value; })) return said(page.userSaid, _('A tag is named %s already').format(name.value));
+				// by the settings as they are now, not as they were when this was drawn: a second click finds what the first added
+				if (uci.sections('adhoc-relay', 'tag').some(function(t) { return t.name == name.value || t.id == number.value; })) return said(page.userSaid, _('A tag is named %s already').format(name.value));
 				var id = uci.add('adhoc-relay', 'tag');
 				uci.set('adhoc-relay', id, 'id', number.value);
 				uci.set('adhoc-relay', id, 'name', name.value);
@@ -793,9 +882,16 @@ return view.extend({
 	// saves the forms and applies them: what a click on Add did works at once. What is wrong - a field of the forms, a key twice - is
 	// said in `where`, and nothing is kept
 	apply: function(where) {
+		var page = this;
 		return this.handleSaveApply(null, '0').catch(function(e) {
+			// what was not saved is forgotten, and the settings there are read again: without them every table would be empty,
+			// and the next Add would be checked against nothing
 			uci.unload('adhoc-relay');
-			said(where, _('Not saved: %s').format(e.message || e));
+			return uci.load('adhoc-relay').then(function() {
+				page.routerSig = page.portsSig = page.keptSig = page.reportsSig = page.userSig = page.tagsSig = null;
+				page.update(page.st);
+				said(where, _('Not saved: %s').format(e.message || e));
+			});
 		});
 	},
 
@@ -809,7 +905,7 @@ return view.extend({
 					throw new Error(found);
 				return cb ? cb() : null;
 			}, silent).then(function(r) {
-				page.portsSig = page.keptSig = null;
+				page.routerSig = page.portsSig = page.keptSig = null;
 				page.update(page.st);
 				return r;
 			});
@@ -823,10 +919,11 @@ return view.extend({
 		this.found = {};
 		L.resolveDefault(callAddress(), {}).then(function(found) {
 			page.found = found || {};
-			page.portsSig = page.keptSig = null;
+			page.routerSig = page.portsSig = page.keptSig = null;
 			page.update(page.st);
 		});
 		this.st = st;
+		this.usedAt = {};
 		this.top = E('div');
 		this.startSaid = E('div');
 		// ── the ports: ♻️ the ports given at each start, ⚓ the fixed ports - their tables, the buttons of the password ──
@@ -843,12 +940,13 @@ return view.extend({
 		tagFilter.addEventListener('cbi-dropdown-change', function() { page.showUsers(); });
 		this.tagAny = select('each', [ [ 'each', _('with each of the tags') ], [ 'any', _('with any of the tags') ] ], function() { page.showUsers(); });
 		this.userSaid = E('div');
+		this.usersNote = E('div');
 		this.tagsBox = E('div');
 		// the users shown - those with the tags chosen - taken away at once: they open nothing, their meetings going on end
 		this.dropShown = small(_('Take away those shown'), function() {
 			if (!page.shown || !page.shown.length) return;
-			ui.showModal(_('Take away %d users').format(page.shown.length), [
-				E('p', _('They open nothing from now on, and their meetings going on end: %s').format(page.shown.map(function(s) { return s.name || s.key; }).join(', '))),
+			modal(_('Take away %d users').format(page.shown.length), [
+				E('p', [ _('They open nothing from now on, and their meetings going on end: %s').format(page.shown.map(function(s) { return s.name || s.key; }).join(', ')) ]),
 				E('div', { 'class': 'right' }, [
 					E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
 					E('button', { 'class': 'btn cbi-button-negative', 'click': function() {
@@ -885,17 +983,49 @@ return view.extend({
 		o.validate = function(id, value) { return /^[A-Za-z0-9]{16}$/.test(value) || _('Exactly 16 letters or digits'); };
 		o = s.taboption('basic', form.Value, 'dns', _('DNS name'),
 			_('Optional. A name in DNS that points to this router: the lines carry it instead of the IP. Empty: the public IP, found automatically.'));
-		o.datatype = 'host(0)';
+		// a name or an IPv4 address: the relay speaks IPv4 only, and a line takes no other
+		o.datatype = 'host(1)';
 		o.placeholder = _('found automatically');
 		o = s.taboption('ports', form.Value, 'first', _('First port'), _('Servers ask this port for a port. The ports after it, up to the last, are given to servers.'));
 		o.datatype = 'port';
 		o.placeholder = '40000';
+		var range = { first: o };
 		o = s.taboption('ports', form.Value, 'last', _('Last port'), _('This router opens the range in its own firewall. A router in front of it must forward the range to it, TCP and UDP.'));
 		o.datatype = 'port';
 		o.placeholder = '49999';
-		o = s.taboption('ports', form.ListValue, 'wait', _('Hold'), _('How long a server keeps its port after its last knock. Servers knock every 20 s.'));
+		range.last = o;
+		// The range as the rules load it: the first below the last - else no rules load at all, and the page says Not running with
+		// no reason -, no zeros in front - nft takes such a number for one of base 8 -, every fixed port inside it - one left
+		// outside is left out by the rules, and its line opens nothing
+		[ 'first', 'last' ].forEach(function(n) {
+			range[n].validate = function(id, v) {
+				var other = range[n == 'first' ? 'last' : 'first'].formvalue(id);
+				var f = +((n == 'first' ? v : other) || 40000), l = +((n == 'last' ? v : other) || 49999);
+				if (v && !/^[1-9][0-9]*$/.test(v)) return _('A port, no zero in front');
+				if (!(f < l)) return _('The last port must be above the first');
+				var out = uci.sections('adhoc-relay', 'fixed').filter(function(x) { return +x.port <= f || +x.port > l; })[0];
+				return out ? _('Fixed port %s is outside these ports').format(out.port) : true;
+			};
+		});
+		o = s.taboption('ports', form.ListValue, 'wait', _('Hold'), _('How long a server keeps its port after its last knock: at least 10 s more than Knock every, so a knock that comes late loses nothing.'));
 		choices(o, [ [ '30', _('30 s') ], [ '60', _('1 min') ], [ '120', _('2 min') ], [ '300', _('5 min') ], [ '600', _('10 min') ], [ '1800', _('30 min') ], [ '3600', _('1 h') ] ]);
 		o.default = '60';
+		var hold = o;
+		// The times of the servers: the router tells each server them when it binds its port. A knock may come late, and the
+		// port must stay open till the next one: Hold 10 s more than the knock at least - as `rules` and `adhoc-relay api` take them
+		o = s.taboption('ports', form.ListValue, 'knock', _('Knock every'), _('How often a waiting server knocks to keep its port open. Its NAT must remember a knock until the next one: most remember 30 s or more, some less - a server behind such a NAT loses its port. Knocks are a small part of what a waiting server costs the router.'));
+		choices(o, [ [ '10', _('10 s') ], [ '15', _('15 s') ], [ '20', _('20 s') ], [ '25', _('25 s') ] ]);
+		o.default = '20';
+		var knock = o;
+		hold.validate = function(id, v) {
+			return +(v || 60) >= +(knock.formvalue(id) || 20) + 10 ? true : _('At least 10 s more than Knock every');
+		};
+		o = s.taboption('ports', form.ListValue, 'dial', _('Dial try'), _('How long one dialing try of a waiting server lasts. Within a try its system sends the SYN again after 1, 3, 7 and 15 s, and the router looks at every SYN: they are most of what a waiting server costs it. 31 s sends a quarter of the SYNs of 3 s - a third from Windows, which ends a try at 21 s -, and the router holds about three times as many waiting servers. Clients connect as fast. A server started again on the same port takes it back at once behind a NAT that keeps its port, as most do; behind one that does not, within about half the try.'));
+		choices(o, [ [ '3', _('3 s') ], [ '7', _('7 s') ], [ '15', _('15 s') ], [ '31', _('31 s') ] ]);
+		o.default = '31';
+		o = s.taboption('ports', form.ListValue, 'rebind', _('Bind again every'), _('How often a server binds its port again. Each bind is work for the router, as much as a few hundred SYNs. A server also binds again at once when its knock is refused, and after its port refused it three times; a router that drops what comes to a closed port, not refuses it, is found to have forgotten the port only at the next bind. The key of the knocks of a server lives twice as long: a server stopped without a word is forgotten then.'));
+		choices(o, [ [ '5', _('5 min') ], [ '10', _('10 min') ], [ '15', _('15 min') ], [ '30', _('30 min') ], [ '60', _('1 h') ] ]);
+		o.default = '30';
 		o = s.taboption('guard', form.ListValue, 'tries', _('Wrong tries'), _('Requests and knocks with a wrong password or key, per address. One more is allowed each minute; past them the address is blocked.'));
 		choices(o, [ [ '3', '3' ], [ '5', '5' ], [ '10', '10' ], [ '20', '20' ], [ '50', '50' ] ]);
 		o.default = '5';
@@ -914,6 +1044,9 @@ return view.extend({
 		choices(o, [ [ '3', '3' ], [ '5', '5' ], [ '10', '10' ], [ '20', '20' ] ]);
 		o.default = '5';
 		o.depends('guard', '1');
+		o = s.taboption('guard', form.ListValue, 'connections', _('Connections per address'), _('Connections one address may have through the router at once. One more meets nobody until one of them ends; a connection whose client is gone without closing it counts until the server closes it too. Several people behind one public address - an office, a mobile network - count as one address.'));
+		choices(o, [ [ '0', _('any number') ], [ '2', '2' ], [ '4', '4' ], [ '8', '8' ], [ '16', '16' ], [ '32', '32' ], [ '64', '64' ] ]);
+		o.default = '0';
 		// the details of each setting in its tooltip: the form shows the names and the values
 		s.children.forEach(function(v) { if (v.description) { v.tooltip = v.description; v.tooltipicon = 'ⓘ'; v.description = null; } });
 
@@ -949,11 +1082,21 @@ return view.extend({
 
 		// ── what happens now, under the ports: the addresses blocked - only while there are any -, what came in the last 10 minutes,
 		// folded: for finding out why something does not work ──
-		this.blocked = table([ _('Address'), _('Why'), _('Blocked for') ]);
+		this.blocked = table([ _('Address'), _('Why'), _('Blocked for'), '' ]);
 		this.blockedCount = E('span');
 		this.blockedBox = E('div', { 'style': 'display:none' });
 		this.tries = table([ _('When'), _('From'), _('Port'), _('What') ]);
 		this.triesNote = E('span');
+		// opened: its rows are asked for now - folded, the router does not make them
+		// Open or folded is remembered while the tab of the browser lives: Turn on applies the settings, the page comes anew after
+		// it, and the list it was clicked in is open again
+		var kept = function(open) { try { if (open == null) return window.sessionStorage.getItem('adhoc-relay-tries') == '1'; window.sessionStorage.setItem('adhoc-relay-tries', open ? '1' : '0'); } catch (e) {} return false; };
+		this.triesBox = E('details', { 'style': 'margin-top:1.2em', 'toggle': function() { kept(page.triesBox.open); if (page.triesBox.open && page.fresh) page.fresh(); else page.showTries(); } }, [
+			E('summary', { 'style': 'cursor:pointer; font-weight:bold' }, [ _('The last 10 minutes'), tip(_('Requests for a port, knocks, connections to the ports held, IPs reported and looked up: for finding out why something does not work. Scans of the internet at ports nobody holds are left out. Off unless turned on here: while on, the router notes each of them - one more write at every knock, request and connection. Turn it off when done.')) ]),
+			E('div', { 'class': 'cbi-section-descr' }, this.triesNote),
+			this.tries
+		]);
+		if (kept()) this.triesBox.open = true;
 		this.keptTable = table([ _('Relay'), _('Its IP now'), _('Reported'), '' ]);
 		this.reportsTable = table([ _('Relay'), _('Servers can look it up'), _('Last answer'), _('It sees this router as'), '' ]);
 
@@ -967,7 +1110,22 @@ return view.extend({
 		return Promise.all([ mMain.render() ]).then(function(maps) {
 			// the forms loaded the settings into uci: what depends on them now
 			page.update(st);
-			poll.add(function() { return L.resolveDefault(callStatus(), {}).then(L.bind(page.update, page)); }, 5);
+			// What the router does now, each 10 s - not while the page is out of sight: every asking is work for the router. The
+			// meetings - the router reads every connection it knows for them - and the ports one by one - with thousands of
+			// servers, thousands of lines of its sets - only on the tab Ports, where they show; the last 10
+			// minutes only while that list is open. On the other tabs the count of connections at the top is the last one seen. An
+			// answer that did not come - a timeout, rpcd started again - draws nothing: the page keeps what it showed, and does
+			// not say Not running of a router that runs. An answer that took long - thousands of servers, a slow router - is asked
+			// for again only after twice that time: the page takes a third of the router at most
+			var fresh = page.fresh = function() {
+				var ports = page.shownTab() == 'ports', start = Date.now();
+				return L.resolveDefault(callStatus(ports, ports && page.triesBox.open), null).then(function(now) {
+					page.restUntil = Date.now() + 2 * (Date.now() - start);
+					if (now && now.running != null) page.update(now);
+				});
+			};
+			poll.add(function() { return document.hidden || Date.now() < (page.restUntil || 0) ? Promise.resolve() : fresh(); }, 10);
+			document.addEventListener('visibilitychange', function() { if (!document.hidden) fresh(); });
 
 			var tabs = E('div', {}, [
 				E('div', { 'data-tab': 'ports', 'data-tab-title': _('Ports') }, [
@@ -983,18 +1141,15 @@ return view.extend({
 						head([ '⛔ ' + _('Blocked addresses'), page.blockedCount ], '', _('Too many wrong passwords or keys block an address at every port; too many short connections to one port - password guessing - block it at that port.')),
 						page.blocked
 					]), page.blockedBox),
-					E('details', { 'style': 'margin-top:1.2em' }, [
-						E('summary', { 'style': 'cursor:pointer; font-weight:bold' }, [ _('The last 10 minutes'), tip(_('Requests for a port, knocks, connections to the ports held, IPs reported and looked up: for finding out why something does not work. Scans of the internet at ports nobody holds are left out.')) ]),
-						E('div', { 'class': 'cbi-section-descr' }, page.triesNote),
-						page.tries
-					])
+					page.triesBox
 				]),
 				E('div', { 'data-tab': 'users', 'data-tab-title': _('Users') }, [
 					head('🔑 ' + _('Users'), small('+ ' + _('Add a user'), function() { page.userDialog(null); }, 'add'),
-						_('A user gets a key of their own, using any free port, a fixed port, or the IP of a record: it works as the password, the key of that port or its read key, until its last day. What the meetings it opens carry through this router is counted, and stopped past its limit. Direct only: its traffic can be passed via a direct connection only. Take it away, and it opens nothing: its meetings going on end too. Tags group the users: choose by them, and take a group away at once. Click a name to change it.')),
+						_('A user gets a key of their own, using any free port, a fixed port, or the IP of a record: it works as the password, the key of that port or its read key, until its last day. With a limit, what its meetings carry through this router is counted, and stopped past the limit: more work for the router, each packet of them. Without a limit nothing is counted. Direct only: its traffic can be passed via a direct connection only. Take it away, and it opens nothing; with a limit, its meetings going on end too. Tags group the users: choose by them, and take a group away at once. Click a name to change it.')),
 					E('div', { 'style': 'display:flex; flex-wrap:wrap; gap:.5em; align-items:center; margin:.5em 0' }, [
 						tagFilter, page.tagAny, page.dropShown
 					]),
+					page.usersNote,
 					page.userTable,
 					page.userSaid,
 					head(_('The names of the tags'), '', _('A tag is a number of 0-255; a name makes it easier to choose. Up to 8 tags to a user.')),
@@ -1016,7 +1171,8 @@ return view.extend({
 				])
 			]);
 			tabs.childNodes.forEach(function(pane) {
-				pane.addEventListener('cbi-tab-active', function(ev) { page.footer(ev.detail.tab); });
+				// back on Ports: the meetings are asked for at once
+				pane.addEventListener('cbi-tab-active', function(ev) { page.footer(ev.detail.tab); if (ev.detail.tab == 'ports' && page.tabSeen && page.tabSeen != 'ports') fresh(); page.tabSeen = ev.detail.tab; });
 			});
 			var root = E('div', {}, [
 				E('h2', _('AdHoc Relay')),

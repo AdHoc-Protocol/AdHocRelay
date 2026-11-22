@@ -5,6 +5,8 @@
 # router, another router or the NAT of the provider, must forward the range to it.
 # `state status` - what it does now:
 #   running   the rules are loaded
+#   failed    the last load of the rules failed, and why: the settings there are are not applied - the rules of before run on,
+#             or none
 #   giving    `give` runs: servers get ports
 #   missing   the packages of OpenWrt it needs and waits for, when there are: they come once the router reaches them
 #   ports     the ports given: the port, the address of the server - the last that knocked with the id the port is given to - its state - held ( closed ), open, or open and
@@ -13,52 +15,108 @@
 #   blocked   the addresses blocked for wrong requests or knocks, and those blocked at a port for guessing passwords there - `port`
 #             -, and when the block ends
 #   tries     what came in the last 10 minutes, the newest first, 30 at most: seconds ago, from - address and source port - the
-#             port of the range, and what - request, knock ( with the id the port is given to ), stranger ( a knock with another
-#             id ), wrong ( password ), blocked ( the address is blocked ), dial-a ( a SYN of an address that knocked with the id ),
+#             port of the range, and what - request ( a bind ), knock ( with the key of the knocks of the port ), wrong ( a
+#             request with the id of no key, or other bytes at a port ), blocked ( the address is blocked ), dial-a ( a SYN of an
+#             address that knocked ),
 #             dial ( a SYN of another ), guessing ( a SYN of an address blocked at that port for guessing ), wrote ( a meeting
 #             point of a changing address wrote its address ), read ( a server read an address ), call ( a client called a
-#             server, to meet it directly ); `tries_all` - how many there are in all
+#             server, to meet it directly ); `tries_all` - how many there are in all. Noted only while the log is turned on
+#   log       the log of the last 10 minutes is turned on: its rules are loaded. Off, `tries` is empty
 #   records   the addresses relays of changing addresses wrote here, as `give` keeps them: the name of the record, the
 #             address, seconds since the last write
 #   reports   the relays this router writes its own address to: where, seconds since the last write and since the last
 #             answer - none, never - and the address of this router as that relay saw it
 # A time to the end of something - `free`, `ends` - is as nft writes it, cut to seconds: 1m3s.
+# `state status asked` - the same, for the page: what it asks for is JSON on the standard input, { "meetings": false, "tries":
+# false } - what it does not show now is not made, and its key is not in the answer. The meetings are asked for on the tab
+# Ports alone, and so are the ports one by one and when they were used: without them, "ports", "used" and "marked" are not in
+# the answer - "ports_all" is. The costly parts: every connection the router knows is read for the meetings, the whole table of
+# conntrack; with thousands of servers, the sets of who holds each port, which is open, where its side dials from, for the
+# ports; the tries are a pass of the table and a sort more.
 
 . /usr/share/libubox/jshn.sh
 
 # what `give` keeps of the records and the reports, rewritten as they change
 STATE=/tmp/adhoc-relay
 
-# the sets of the table as nft lists it, in one pass: "P <port> <free in> <the server or -> <held|open|dialing> <dials from or ->"
-# for each port given, then "B <address> <blocked for> <port or ->" for each blocked one - at a port: it guessed passwords there. What `expires` says is cut to seconds: "52s880ms" ->
-# "52s"
+# The sets of the table as nft lists it, in one pass, as JSON: "ports" - each port given: its port, `free` - how long till it is
+# free, `a` - its server, `state` - held, open or dialing, `dials` - from where -, and "blocked" - each address blocked: `address`,
+# `ends`, `port` when it is blocked at a port: it guessed passwords there. What `expires` says is cut to seconds: "52s880ms" ->
+# "52s". A line of the listing holds whole elements: each line is taken as it comes, nothing gathered. Of the ports the first
+# 1000, of the blocked the first 100, and how many there are of each: "ports_all", "blocked_all". $1 - 0: the ports counted
+# alone, "ports" not made
+# The JSON of the lists is written by awk, a line an element: the functions of the shell for JSON take a time that grows with the
+# square of what they hold - a second for a thousand ports, on a computer far faster than a router
 sets() {
-	awk '
-		function items(name, all,    n, it, i, m, w, j, left) {
-			n = split(all, it, ",")
-			for (i = 1; i <= n; i++) {
-				m = split(it[i], w, " ")
-				if (m == 0) continue
-				left = "-"
-				for (j = 1; j < m; j++) if (w[j] == "expires") { left = w[j + 1]; sub(/[0-9]+ms$/, "", left); if (left == "") left = "0s" }
-				if (name == "given") { pg++; port[pg] = w[1]; free[pg] = left }
-				else if (name == "holder") owner[w[1]] = w[3] # port . address
-				else if (name == "open") opened[w[1]] = 1
-				else if (name == "seen") { if (!(w[1] in a)) a[w[1]] = w[3] ":" w[5] } # port . address . source port
-				else if (name == "blocked") { pb++; address[pb] = w[1]; ends[pb] = left; at[pb] = "-" }
-				else if (name == "guessing") { pb++; address[pb] = w[1]; ends[pb] = left; at[pb] = w[3] } # address . port
+	awk -v detail="$1" '
+		function q(t) { gsub(/\\/, "\\\\", t); gsub(/"/, "\\\"", t); return "\"" t "\"" }
+		# what `expires` says of an element, cut to seconds - "52s880ms" -> "52s" -, by no pattern; "-" when it says nothing
+		function left(e,    c) {
+			c = index(e, " expires ")
+			if (!c) return "-"
+			e = substr(e, c + 9)
+			c = index(e, " ")
+			if (c) e = substr(e, 1, c - 1)
+			if (substr(e, length(e) - 1) == "ms") {
+				e = substr(e, 1, length(e) - 2)
+				while (e != "" && index("0123456789", substr(e, length(e)))) e = substr(e, 1, length(e) - 1)
 			}
+			return e == "" ? "0s" : e
 		}
-		$1 == "set" || $1 == "map" || $1 == "chain" { name = $1 == "set" ? $2 : "" }
-		/elements = \{/ { on = 1; all = ""; sub(/.*elements = \{/, "") }
-		on { all = all " " $0; if (index($0, "}")) { on = 0; sub(/\}.*/, "", all); items(name, all) } }
+		function one(e,    m, w) {
+			# Only what will be shown is taken apart: the ports past the first 1000 and the blocked past the first 100 are
+			# counted, no more; of who holds a port, where its side dials from, whether it is open - those of the ports
+			# shown, known by the number an element begins with. A port given is its number and its time: no word taken apart
+			if (name == "given") {
+				if (e + 0) { if (++pg <= 1000 && detail) { port[pg] = e + 0; free[pg] = left(e); shown[e + 0] = 1 } }
+				return
+			}
+			if (name == "blocked" || name == "guessing") { if (pb >= 100) { if (e + 0) pb++; return } }
+			else if (!((e + 0) in shown)) return
+			m = split(e, w, " ")
+			if (m == 0) return
+			if (name == "holder") owner[w[1]] = w[3] # port . address
+			else if (name == "open") opened[w[1]] = 1
+			else if (name == "seen") { if (!(w[1] in a)) a[w[1]] = w[3] ":" w[5] } # port . address . source port
+			else if (name == "blocked") { pb++; address[pb] = w[1]; ends[pb] = left(e); at[pb] = "-" }
+			else if (name == "guessing") { pb++; address[pb] = w[1]; ends[pb] = left(e); at[pb] = w[3] } # address . port
+		}
+		# The lines of elements are most of what is read, thousands with thousands of servers, and the awk of a router is slow
+		# with them: a line of one element - nft writes each with a time on a line of its own - is taken whole, not split; no
+		# pattern looks at it
+		on {
+			line = $0
+			if (e = index(line, "}")) { line = substr(line, 1, e - 1); on = 0 }
+			if (want) {
+				e = index(line, ",")
+				if (!e || e == length(line)) one(e ? substr(line, 1, e - 1) : line)
+				else { n = split(line, it, ","); for (i = 1; i <= n; i++) one(it[i]) }
+			}
+			next
+		}
+		$1 == "set" || $1 == "map" || $1 == "chain" {
+			name = $1 == "set" ? $2 : ""
+			want = (name == "given" || name == "holder" || name == "open" || name == "seen" || name == "blocked" || name == "guessing")
+		}
+		index($0, "elements = {") {
+			on = 1; $0 = substr($0, index($0, "elements = {") + 12)
+			if (e = index($0, "}")) { $0 = substr($0, 1, e - 1); on = 0 }
+			if (want) { n = split($0, it, ","); for (i = 1; i <= n; i++) one(it[i]) }
+		}
 		END {
-			for (i = 1; i <= pg; i++) {
+			# what a port says is numbers, addresses and times of nft, and words of here: nothing in it to escape, no q() - two
+			# patterns a word, a second of a router for 1000 ports
+			if (detail) printf "\"ports\":["
+			for (i = 1; detail && i <= pg && i <= 1000; i++) {
 				p = port[i]
 				state = !(p in opened) ? "held" : (p in a) ? "dialing" : "open"
-				print "P", p, free[i], ((p in owner) ? owner[p] : "-"), state, ((state == "dialing") ? a[p] : "-")
+				printf "%s{\"port\":%d,\"free\":\"%s\"%s,\"state\":\"%s\"%s}", (i > 1 ? "," : ""), p, free[i], ((p in owner) ? ",\"a\":\"" owner[p] "\"" : ""),
+					state, (state == "dialing" ? ",\"dials\":\"" a[p] "\"" : "")
 			}
-			for (i = 1; i <= pb; i++) print "B", address[i], ends[i], at[i]
+			printf "%s\"ports_all\":%d,\"blocked\":[", (detail ? "]," : ""), pg
+			for (i = 1; i <= pb && i <= 100; i++)
+				printf "%s{\"address\":%s,\"ends\":%s%s}", (i > 1 ? "," : ""), q(address[i]), q(ends[i]), (at[i] != "-" ? ",\"port\":" (at[i] + 0) : "")
+			printf "],\"blocked_all\":%d", pb
 		}'
 }
 
@@ -89,9 +147,12 @@ tries() {
 				else if (name ~ /^t_/) { t++; kind[t] = name; ago[t] = 600 - left; addr[t] = w[1]; from[t] = w[1] ":" w[3]; port[t] = w[5] } # address . source port . port
 			}
 		}
-		$1 == "set" || $1 == "map" || $1 == "chain" { name = $1 == "set" ? $2 : "" }
-		/elements = \{/ { on = 1; all = ""; sub(/.*elements = \{/, "") }
-		on { all = all " " $0; if (index($0, "}")) { on = 0; sub(/\}.*/, "", all); items(name, all) } }
+		/^[ 	]*(set|map|chain) / {
+			name = $1 == "set" ? $2 : ""; on = 0
+			want = (name == "holder" || name == "blocked" || name == "guessing" || name ~ /^t_/)
+		}
+		want && /elements = \{/ { on = 1; sub(/.*elements = \{/, "") }
+		on { line = $0; e = index(line, "}"); if (e) { line = substr(line, 1, e - 1); on = 0 } items(name, line) }
 		END {
 			for (i = 1; i <= t; i++) {
 				k = kind[i]; mine = (port[i] " " addr[i]) in owner
@@ -99,7 +160,7 @@ tries() {
 				else if (k == "t_wrote") k = "wrote"
 				else if (k == "t_read") k = "read"
 				else if (k == "t_called") k = "call"
-				else if (k == "t_knocked") k = mine ? "knock" : "stranger"
+				else if (k == "t_knocked") k = "knock"
 				else if (k == "t_refused") k = (addr[i] in blocked) ? "blocked" : "wrong"
 				else k = mine ? "dial-a" : ((addr[i] " " port[i]) in guessing) ? "guessing" : "dial"
 				print ago[i], "T", from[i], port[i], k
@@ -124,60 +185,77 @@ address() {
 }
 
 status() {
+	# all of it, unless the page says what it shows now
+	meetings_wanted=1 tries_wanted=1
+	if [ "$1" = asked ]; then
+		json_load "$(cat)" 2>/dev/null && {
+			json_get_var one meetings
+			json_get_var two tries
+			[ "$one" != 0 ] || meetings_wanted=0
+			[ "$two" != 0 ] || tries_wanted=0
+		}
+	fi
 	json_init
-	if ! table=$(nft list table ip adhoc_relay 2>/dev/null); then
+	# the last load of the rules failed: what is loaded - the rules of before, or none - is not of the settings there are
+	[ ! -s "$STATE/failed" ] || json_add_string failed "$(cat "$STATE/failed")"
+	# The sets it shows, each by an nft of its own - several in one command an nft of 1.1 takes for a mistake -, into a file of
+	# the memory, read from there by the awk of each list - a file for each, as each line costs the awk of a router: the ports
+	# ( $table ), the meetings of the day and the users of the ports ( .used ), the quotas ( .users ), the log ( .log ). Not the
+	# table whole: with thousands of servers most of it is the keys of their knocks, four maps the page shows nothing of - a
+	# listing of all of it took seconds and megabytes of a router, an nft for each set some 20 ms. The first fails when there is
+	# no table. The sets of the log only while it is on and the page shows it
+	table="$STATE/table.$$"
+	mkdir -p "$STATE"
+	trap 'rm -f "$table" "$table.used" "$table.users" "$table.log"' EXIT
+	if ! (umask 077; nft list set ip adhoc_relay given > "$table" 2>/dev/null); then
 		json_add_boolean running 0
 		json_dump
 		return
 	fi
+	(
+		umask 077
+		for s in blocked guessing; do nft list set ip adhoc_relay "$s"; done >> "$table"
+		# who holds a port tells the tries of its side from those of others too
+		[ "$meetings_wanted$tries_wanted" = 00 ] || for s in holder open seen; do nft list set ip adhoc_relay "$s"; done >> "$table"
+		: > "$table.used"
+		[ "$meetings_wanted" = 0 ] || { nft list set ip adhoc_relay met; for s in port_user0 port_user1; do nft list map ip adhoc_relay "$s"; done; } > "$table.used"
+		{ nft list quotas table ip adhoc_relay; nft list counters table ip adhoc_relay; } > "$table.users"
+		: > "$table.log"
+		[ "$tries_wanted" = 1 ] && nft list set ip adhoc_relay t_asked > "$table.log" && for s in t_knocked t_refused t_dialed t_wrote t_read t_called; do
+			nft list set ip adhoc_relay "$s"
+		done >> "$table.log"
+	) 2>/dev/null
 	json_add_boolean running 1
-	if pgrep -f 'adhoc-relay/give.uc' >/dev/null; then json_add_boolean giving 1; else json_add_boolean giving 0; fi
-	# the packages it needs are being installed: right after an install by the page of LuCI, before the router reaches the internet
-	missing=$(/usr/libexec/adhoc-relay/needs 2>/dev/null)
-	[ -n "$(echo $missing)" ] && json_add_string missing "$(echo $missing)"
-
-	# the loops read here-documents, not pipes: a loop in a pipe runs in a subshell, and what it adds to the JSON is lost
-	json_add_array ports
-	array=ports
-	while read -r tag one two three four five; do
-		case "$tag" in
-		P)
-			json_add_object
-			json_add_int port "$one"
-			json_add_string free "$two"
-			[ "$three" != - ] && json_add_string a "$three"
-			json_add_string state "$four"
-			[ "$five" != - ] && json_add_string dials "$five"
-			json_close_object
-			;;
-		B)
-			if [ "$array" = ports ]; then
-				json_close_array
-				json_add_array blocked
-				array=blocked
-			fi
-			json_add_object
-			json_add_string address "$one"
-			json_add_string ends "$two"
-			[ -n "$three" ] && [ "$three" != - ] && json_add_int port "$three"
-			json_close_object
-			;;
-		esac
-	done <<-EOF
-	$(printf '%s\n' "$table" | sets)
-	EOF
-	json_close_array
-	# none blocked: the list is there all the same, empty
-	if [ "$array" = ports ]; then
-		json_add_array blocked
-		json_close_array
+	if pgrep -f 'adhoc-relay/give.uc' >/dev/null; then
+		json_add_boolean giving 1
+	else
+		json_add_boolean giving 0
+		# the packages it needs are being installed: right after an install by the page of LuCI, before the router reaches the
+		# internet. `give` runs: they are there, nothing to look for
+		missing=$(/usr/libexec/adhoc-relay/needs 2>/dev/null)
+		[ -n "$(echo $missing)" ] && json_add_string missing "$(echo $missing)"
 	fi
 
-	json_add_array meetings
+	# the lists that may be long - the ports, the blocked, the meetings, when the ports were used, the tries - as JSON made by awk,
+	# put after what the functions of the shell made: `lists`
+	lists=$(sets "$meetings_wanted" < "$table")
+	# The offloading of the firewall of the router carries every connection it forwards on its own fast path, past these rules:
+	# with a user that has a limit - a quota of the table -, what its meetings carry is not counted there, and the limit does not
+	# hold. The page says so where the users are
+	offloading=0 flow=0
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading)" != 1 ] || flow=1
+	! grep -q 'quota a_' "$table.users" || offloading=$flow
+	json_add_boolean offloading "$offloading"
+	# the offloading itself, on or off: the page sets no limit while it is on
+	json_add_boolean flow_offloading "$flow"
+
+	if [ "$meetings_wanted" = 1 ]; then
 	# the connections of the mark of AdHoc Relay: the original direction is the client to the relay, the reply comes from the server
 	# the number of a user in the mark - bits 16-23 - is the name of $STATE/users
-	meetings=$(awk -v names="$STATE/users" '
-		BEGIN { while ((getline l < names) > 0) { split(l, w, " "); name[w[1]] = w[3] } }
+	# the first 1000 of them, and how many there are: "meetings_all"
+	lists="$lists,$(awk -v names="$STATE/users" '
+		function q(t) { gsub(/\\/, "\\\\", t); gsub(/"/, "\\\"", t); return "\"" t "\"" }
+		BEGIN { while ((getline l < names) > 0) { split(l, w, " "); name[w[1]] = w[3] }; printf "\"meetings\":[" }
 		/ tcp / && match($0, /mark=[0-9]+/) {
 			mark = substr($0, RSTART + 5, RLENGTH - 5) + 0
 			if (and(mark, 134217728) == 0) next
@@ -192,27 +270,22 @@ status() {
 			id = and(mark, 16711680) / 65536
 			# the client is of the way there - or, met the other way round ( 0x02000000 ), of the way back
 			c = and(mark, 33554432) ? 2 : 1; v = 3 - c
-			print dport[1], src[c] ":" sport[c], src[v] ":" sport[v], $6, (bytes == "" ? "-" : bytes), (id && (id in name) ? name[id] : "-")
-		}' /proc/net/nf_conntrack 2>/dev/null)
-	while read -r port b a state bytes user; do
-		[ -n "$port" ] || continue
-		json_add_object
-		json_add_int port "$port"
-		json_add_string b "$b"
-		json_add_string a "$a"
-		json_add_string state "$state"
-		[ "$bytes" != - ] && json_add_double bytes "$bytes"
-		[ "$user" != - ] && json_add_string user "$user"
-		json_close_object
-	done <<-EOF
-	$meetings
-	EOF
-	json_close_array
+			# the state: the sixth word, after the seconds left. A meeting on the fast path of the kernel is written with
+			# neither: it is established - only such go there
+			st = ($5 ~ /^[0-9]+$/ && $6 ~ /^[A-Z][A-Z_0-9]*$/) ? $6 : ($5 ~ /^[A-Z][A-Z_0-9]*$/) ? $5 : "ESTABLISHED"
+			if (++all <= 1000)
+				printf "%s{\"port\":%d,\"b\":%s,\"a\":%s,\"state\":%s%s%s}", (all > 1 ? "," : ""), dport[1], q(src[c] ":" sport[c]), q(src[v] ":" sport[v]), q(st),
+					(bytes == "" ? "" : sprintf(",\"bytes\":%.0f", bytes)), (id && (id in name) ? ",\"user\":" q(name[id]) : "")
+		}
+		END { printf "],\"meetings_all\":%d", all }' /proc/net/nf_conntrack 2>/dev/null)"
+	fi
 
 	# The ports: when each was used last - its newest meeting of the last day, of the set met -, the client, and the user when
 	# the meeting was of one; "U <port> <seconds ago> <client> <user or ->". And the user each port given is marked with now, of
-	# the map port_user: "M <port> <user>". The number of a user is bits 16-23 of a mark, its name in $STATE/users
-	used=$(printf '%s\n' "$table" | awk -v names="$STATE/users" '
+	# the maps port_user0 and port_user1 - the user of the side that waits there: "M <port> <user>". The number of a user is bits 16-23 of a mark, its name in $STATE/users.
+	# On the tab Ports alone, as the ports one by one
+	[ "$meetings_wanted" = 0 ] || lists="$lists,$(awk -v names="$STATE/users" '
+		function q(t) { gsub(/\\/, "\\\\", t); gsub(/"/, "\\\"", t); return "\"" t "\"" }
 		function secs(t,    n, all) {
 			all = 0
 			while (match(t, /^[0-9]+(ms|d|h|m|s)/)) {
@@ -229,12 +302,11 @@ status() {
 			return (v && (v in name)) ? name[v] : "-"
 		}
 		BEGIN { while ((getline l < names) > 0) { split(l, w, " "); name[w[1]] = (w[3] == "" || w[3] == "-") ? w[2] : w[3] } }
-		$1 == "set" || $1 == "map" || $1 == "chain" { kind = $2 }
-		/elements = \{/ { on = 1; all = ""; sub(/.*elements = \{/, "") }
+		/^[ 	]*(set|map|chain) / { kind = $2; on = 0; want = (kind == "met" || kind == "port_user0" || kind == "port_user1") }
+		want && /elements = \{/ { on = 1; sub(/.*elements = \{/, "") }
 		on {
-			all = all " " $0
-			if (!index($0, "}")) next
-			on = 0; sub(/\}.*/, "", all)
+			all = $0; e = index(all, "}")
+			if (e) { all = substr(all, 1, e - 1); on = 0 }
 			n = split(all, it, ",")
 			for (i = 1; i <= n; i++) {
 				m = split(it[i], w, " ")
@@ -243,38 +315,25 @@ status() {
 					for (j = 1; j < m; j++) if (w[j] == "expires") left = secs(w[j + 1])
 					ago = 86400 - left; p = w[1]
 					if (!(p in best) || ago < best[p]) { best[p] = ago; from[p] = w[3] ":" w[5]; by[p] = user(w[7]) }
-				} else if (kind == "port_user" && m >= 3)
-					print "M", w[1], user(w[m])
+				} else if ((kind == "port_user0" || kind == "port_user1") && m >= 3) {
+					u = user(w[m])
+					# kept, written at the end: not gathered in a string, that grows with the square of its length
+					if (u != "-" && marks < 1000) { marks++; mport[marks] = w[1] + 0; muser[marks] = u }
+				}
 			}
 		}
-		END { for (p in best) print "U", p, best[p], from[p], by[p] }')
-	json_add_array used
-	while read -r tag port ago from user; do
-		[ "$tag" = U ] || continue
-		json_add_object
-		json_add_int port "$port"
-		json_add_int ago "$ago"
-		json_add_string from "$from"
-		[ "$user" != - ] && json_add_string user "$user"
-		json_close_object
-	done <<-EOF
-	$used
-	EOF
-	json_close_array
-	json_add_array marked
-	while read -r tag port user; do
-		[ "$tag" = M ] && [ "$user" != - ] || continue
-		json_add_object
-		json_add_int port "$port"
-		json_add_string user "$user"
-		json_close_object
-	done <<-EOF
-	$used
-	EOF
-	json_close_array
+		END {
+			printf "\"used\":["
+			for (p in best)
+				if (++shown <= 1000)
+					printf "%s{\"port\":%d,\"ago\":%d,\"from\":%s%s}", (shown > 1 ? "," : ""), p, best[p], q(from[p]), (by[p] != "-" ? ",\"user\":" q(by[p]) : "")
+			printf "],\"marked\":["
+			for (i = 1; i <= marks; i++) printf "%s{\"port\":%d,\"user\":%s}", (i > 1 ? "," : ""), mport[i], q(muser[i])
+			printf "]"
+		}' "$table.used")"
 
-	# the users of ports: the kilobytes their meetings carried, and their limit - from the quotas and the counters a_<key> of the
-	# table. A user of a read key carries nothing, and is not here
+	# the users of ports that have a limit: the kilobytes their meetings carried, and their limit - from the quotas a_<key> of the
+	# table. Nothing is counted of a user without a limit: it is not here, nor is a user of a read key
 	json_add_array users
 	while read -r key name kb limit; do
 		[ -n "$key" ] || continue
@@ -285,10 +344,10 @@ status() {
 		[ "$limit" != - ] && json_add_double limit "$limit"
 		json_close_object
 	done <<-EOF
-	$(printf '%s\n' "$table" | awk -v names="$STATE/users" '
+	$(awk -v names="$STATE/users" '
 		function bytes(n, u) { return n * (u == "kbytes" ? 1024 : u == "mbytes" ? 1048576 : u == "gbytes" ? 1073741824 : 1) }
 		BEGIN { while ((getline l < names) > 0) { split(l, w, " "); name[w[2]] = w[3] } }
-		($1 == "quota" || $1 == "counter") && $2 ~ /^a_/ { key = substr($2, 3); next }
+		/^[ 	]*(quota|counter) a_/ { key = substr($2, 3); next }
 		key != "" {
 			used = 0; limit = "-"
 			for (i = 1; i < NF; i++) {
@@ -296,70 +355,68 @@ status() {
 				if ($i == "used") used = bytes($(i + 1), $(i + 2))
 				if ($1 == "packets" && $i == "bytes") used = $(i + 1)
 			}
-			printf "%s %s %d %s\n", key, ((key in name) ? name[key] : "-"), used / 1024, limit
+			# %.0f: %d of busybox is of 32 bits, and turns over past 2 TiB
+			printf "%s %s %.0f %s\n", key, ((key in name) ? name[key] : "-"), int(used / 1024), limit
 			key = ""
-		}')
+		}' "$table.users")
 	EOF
 	json_close_array
 
+	# the log is turned on: its sets are in the table. Off, nothing was noted, and nothing is looked for. Not shown, its sets are
+	# not read: whether there is the first of them - 256 elements at most
+	log=0
+	if [ "$tries_wanted" = 1 ]; then grep -q 'set t_asked' "$table.log" && log=1
+	else nft list set ip adhoc_relay t_asked >/dev/null 2>&1 && log=1
+	fi
+	json_add_boolean log "$log"
+	if [ "$tries_wanted" = 1 ]; then
 	# the newest first; the page shows 30
-	all=$(printf '%s\n' "$table" | tries | sort -n)
-	json_add_int tries_all "$(printf '%s\n' "$all" | grep -c ' T ')"
-	json_add_array tries
-	while read -r ago tag from port what; do
-		[ "$tag" = T ] || continue
-		json_add_object
-		json_add_int ago "$ago"
-		json_add_string from "$from"
-		json_add_int port "$port"
-		json_add_string what "$what"
-		json_close_object
-	done <<-EOF
-	$(printf '%s\n' "$all" | head -n 30)
-	EOF
-	json_close_array
+	lists="$lists,$( { [ "$log" = 0 ] || cat "$table" "$table.log" | tries | sort -n; } | awk '
+		function q(t) { gsub(/\\/, "\\\\", t); gsub(/"/, "\\\"", t); return "\"" t "\"" }
+		BEGIN { printf "\"tries\":[" }
+		$2 == "T" { if (++n <= 30) printf "%s{\"ago\":%d,\"from\":%s,\"port\":%d,\"what\":%s}", (n > 1 ? "," : ""), $1, q($3), $4, q($5) }
+		END { printf "],\"tries_all\":%d", n }')"
+	fi
 
 	# the times of the files are those of the clock: seconds since, never below 0
 	now=$(date +%s)
 	json_add_array records
-	while read -r name ip at; do
-		[ -n "$at" ] || continue
+	[ -f "$STATE/records" ] && while read -r name ip at; do
+		since "$at" || continue
 		json_add_object
 		json_add_string name "$name"
 		json_add_string address "$ip"
-		json_add_int ago "$(since "$at")"
+		json_add_int ago "$s"
 		json_close_object
-	done <<-EOF
-	$(cat "$STATE/records" 2>/dev/null)
-	EOF
+	done < "$STATE/records"
 	json_close_array
 
 	json_add_array reports
-	while read -r to sent answered seen; do
+	[ -f "$STATE/reports" ] && while read -r to sent answered seen; do
 		[ -n "$seen" ] || continue
 		json_add_object
 		json_add_string to "$to"
-		[ "$sent" != 0 ] && json_add_int sent "$(since "$sent")"
-		[ "$answered" != 0 ] && json_add_int answered "$(since "$answered")"
+		[ "$sent" != 0 ] && since "$sent" && json_add_int sent "$s"
+		[ "$answered" != 0 ] && since "$answered" && json_add_int answered "$s"
 		[ "$seen" != - ] && json_add_string seen "$seen"
 		json_close_object
-	done <<-EOF
-	$(cat "$STATE/reports" 2>/dev/null)
-	EOF
+	done < "$STATE/reports"
 	json_close_array
 
-	json_dump
+	# what the functions of the shell made, an object, and the lists after its last member
+	out=$(json_dump)
+	printf '%s, %s }\n' "${out%\}}" "$lists"
 }
 
-# seconds from the unix time $1 to $now
+# seconds from the unix time $1 to $now, in $s: no process for it; 1 - $1 is no time
 since() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
 	s=$((now - $1))
 	[ "$s" -ge 0 ] || s=0
-	echo "$s"
 }
 
 case "$1" in
 address) address ;;
-status) status ;;
-*) echo "usage: state address|status" >&2; exit 2 ;;
+status) status "$2" ;;
+*) echo "usage: state address|status [asked]" >&2; exit 2 ;;
 esac

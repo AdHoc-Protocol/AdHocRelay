@@ -1,0 +1,10 @@
+#!/bin/sh
+# The clock of the router set by NTP with a jump - at its start, when it has no clock of its own and starts from a time of
+# before. The last day of a user is counted from the clock as the rules load: loaded before the jump, a user would open its
+# port that much longer, and one whose day is over would open it at all. The rules load again then, once - only when they are
+# loaded, and a user has a last day.
+[ "$ACTION" = step ] || exit 0
+# the table is there: asked by its quotas, not listed whole - megabytes with thousands of servers
+nft list quotas table ip adhoc_relay >/dev/null 2>&1 || exit 0
+uci -q show adhoc-relay | grep -q '\.expires=' || exit 0
+/etc/init.d/adhoc-relay reload

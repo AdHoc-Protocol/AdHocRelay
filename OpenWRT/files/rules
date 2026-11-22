@@ -1,9 +1,22 @@
 #!/bin/sh
-# The rules of AdHoc Relay in the kernel: `rules load <password> <first port> <last port> <wait seconds> <tries> <block seconds>
-# <guard 1|0> <short seconds> <guesses> [<fixed ports> [<records> [<users>]]]` loads the table
-# adhoc_relay, turns on the forwarding of packets and lets the meetings, and the requests for a port to the first port, through the
-# firewall there is - fw4 of OpenWrt, the FORWARD and INPUT chains of iptables ( Docker, ufw ); `rules unload` takes them away.
-# `rules save` keeps what the users counted. The init script of OpenWrt and the service of systemd call it; anything else can too.
+# The rules of AdHoc Relay in the kernel: `rules load` loads the table adhoc_relay, turns on the forwarding of packets and lets
+# the meetings, and the requests for a port to the first port, through the firewall there is - fw4 of OpenWrt, the FORWARD and
+# INPUT chains of iptables ( Docker, ufw ); `rules unload` takes them away. `rules save` keeps what the users counted. The init
+# script of OpenWrt and the service of systemd call it; anything else can too. `rules unblock <address> [<port>]` lets an address
+# blocked in again - blocked for wrong requests, or, with the port, at that port for guessing passwords there.
+# The settings `rules load` takes from its environment - PASSWORD FIRST LAST WAIT TRIES BLOCK GUARD SHORT GUESSES FIXED RECORDS
+# USERS LOG CONNECTIONS DIAL REBIND, the names of /etc/adhoc-relay.conf of a Linux computer: the password and the keys are in no command line then, where
+# every user of the computer reads them. Or from its arguments: `rules load <password> <first port> <last port> <wait seconds>
+# <tries> <block seconds> <guard 1|0> <short seconds> <guesses> [<fixed ports> [<records> [<users> [<log 1|0> [<connections>
+# [<dial seconds> [<rebind minutes>]]]]]]]`.
+# The dial: how long a try of dialing of a server is - its system sends the SYN again within it, after 1, 3, 7 and 15 s -, 3, 7,
+# 15 or 31; the rules know where a server waits as long as the longest time between two of its SYNs, and a little more. The
+# rebind: how often a server binds again, minutes; the key of its knocks lives two times that in the rules. `give` tells a
+# server both, and how often to knock.
+# The connections: the meetings one address of a client may have at once; 0 - as it is unless asked for - any number: the lines
+# of the count are left out, nothing counts.
+# The log: what came in the last 10 minutes, noted for the page. 1 - its rules are loaded; else - as it is unless asked for -
+# they are left out, and nothing is noted: one write less at each knock, request and SYN.
 # The fixed ports: "<port>:<key>[:<name>] ...". The records: "<name>:<write key>:<read key>[,<read key>...] ...". The users:
 # "<of>:<key>:<expires>:<limit>[:<name>] ...", see with_users(). A key is 16 letters or digits, each other than the password and the
 # other keys; an entry that is not is left out, and said.
@@ -12,9 +25,11 @@ TABLE=/usr/share/adhoc-relay/adhoc-relay.nft
 # fw4: its forward and input chains take these files in
 FW4=/usr/share/nftables.d/chain-pre/forward/30-adhoc-relay.nft
 FW4_IN=/usr/share/nftables.d/chain-pre/input/30-adhoc-relay.nft
-# iptables: the rules at the top of its FORWARD chain - the meetings, and the calls sent on to their sides
-MEETINGS='-m connmark --mark 0x08000000/0x08000000 -m comment --comment adhoc-relay -j ACCEPT'
-CALLS='-m connmark --mark 0x04000000/0x04000000 -m comment --comment adhoc-relay -j ACCEPT'
+# iptables: the rules at the top of its FORWARD chain - the meetings, and the calls sent on to their sides. By more than the
+# bit of the mark: a connection the relay sent on is TCP for a meeting, UDP for a call, and its destination was changed - DNAT.
+# Another program that marks connections with the same bit - a VPN, a policy of routing - is not let through the firewall by it
+MEETINGS='-p tcp -m connmark --mark 0x08000000/0x08000000 -m conntrack --ctstate DNAT -m comment --comment adhoc-relay -j ACCEPT'
+CALLS='-p udp -m connmark --mark 0x04000000/0x04000000 -m conntrack --ctstate DNAT -m comment --comment adhoc-relay -j ACCEPT'
 # what the users counted, kept through loads and restarts; the numbers and names of the users, for the page: OpenWrt, or a
 # Linux computer
 if [ -d /etc/config ]; then USED=/etc/adhoc-relay.used STATE=/tmp/adhoc-relay; else USED=/var/lib/adhoc-relay/used STATE=/run/adhoc-relay; fi
@@ -26,12 +41,14 @@ include() {
 	printf '%s\n' "$2" > "$1"
 }
 
-# takes away the rules of AdHoc Relay from the INPUT chain of iptables: the port of requests in them may be another
-input_off() {
-	iptables -S INPUT 2>/dev/null | grep -- '--comment adhoc-relay' | sed 's/^-A //' | while read -r rule; do
+# takes away the rules of AdHoc Relay from a chain of iptables, by their comment: the port of requests in those of INPUT may be
+# another, and those of FORWARD of a release before said less
+chain_off() {
+	iptables -S "$1" 2>/dev/null | grep -- '--comment adhoc-relay' | sed 's/^-A //' | while read -r rule; do
 		eval "iptables -D $rule"
 	done
 }
+input_off() { chain_off INPUT; }
 
 reload_fw4() { [ -n "$(nft list tables 2>/dev/null | grep 'inet fw4')" ] && fw4 -q reload; }
 
@@ -52,10 +69,16 @@ iptables_on() { command -v iptables >/dev/null && iptables -S FORWARD >/dev/null
 brief() {
 	# A call lives 2 s in conntrack, not the 30 of UDP: a call and its answer are one exchange. Else another client that calls the
 	# same server meanwhile - to the same local port of it - would need the same way back, and be dropped. A kernel without
-	# timeouts of conntrack keeps a call 30 s, and the log says so
-	printf '%s\n' 'add ct timeout ip adhoc_relay call { protocol udp; l3proto ip; policy = { unreplied : 2s, replied : 2s }; }' \
+	# timeouts of conntrack keeps a call 30 s, and the log says so. The times as bare numbers of seconds: an nft before 1.0.9 -
+	# of Debian 12 - takes no `2s` there
+	printf '%s\n' 'add ct timeout ip adhoc_relay call { protocol udp; l3proto ip; policy = { unreplied : 2, replied : 2 }; }' \
 		'insert rule ip adhoc_relay call ct timeout set "call"' | nft -f - 2>/dev/null ||
 		echo "no timeouts of conntrack in this kernel: a call is kept 30 s, and another client calling the same server meanwhile is dropped" >&2
+	# A meeting that never finishes its handshake - a SYN sent to a port open, and nothing after it - lives 10 s in conntrack, not
+	# the 120 of TCP: it holds the address and the port its server dials from that long. Set at the first packet of a meeting
+	# alone; once the two have shaken hands, the times of the computer hold as for any connection
+	printf '%s\n' 'add ct timeout ip adhoc_relay meeting { protocol tcp; l3proto ip; policy = { syn_sent : 10, syn_recv : 10 }; }' \
+		'insert rule ip adhoc_relay met ct timeout set "meeting"' | nft -f - 2>/dev/null
 }
 
 fast() {
@@ -63,18 +86,64 @@ fast() {
 	[ "$(uci -q get firewall.@defaults[0].flow_offloading 2>/dev/null)" = 1 ] && return 0
 	devices=$(ip -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1) }' | sort -u | tr '\n' ',' | sed 's/,$//')
 	[ -n "$devices" ] || return 0
-	nft -f - 2>/dev/null <<-EOF || echo "no flowtable in this kernel: the meetings the relay carries take the slow way" >&2
-	table ip adhoc_relay_fast {
-		flowtable ft {
-			hook ingress priority filter; devices = { $devices };
-		}
-		chain fast {
-			type filter hook forward priority filter - 1;
-			ct state established ct mark & 0x08ff0000 == 0x08000000 flow add @ft
-		}
-	}
-	EOF
+	# Every packet the computer forwards passes the rule of `fast`: the mark - of all that is no meeting it is the one test.
+	# The meetings of a user with a limit stay out: their mark has the bit of the count, 0x01000000.
+	# A meeting goes onto the fast path once it is no more fresh, `short` seconds old: a kernel from 6.14 on carries the FIN and
+	# the RST of a connection on its fast path past the rules, and the guard would never see a short meeting end. With the guard
+	# off, at once. Into the table of the rules, where `fresh` is; loaded apart from it: a kernel without flowtables has the rules
+	# all the same. With `counter` the bytes of a meeting on the fast path are counted on, where the kernel counts the bytes of
+	# connections; an nft that has no such word loads the flowtable without it
+	young=
+	[ -n "$off" ] || young='add rule ip adhoc_relay to_fast meta l4proto tcp ct mark & 0x02000000 == 0 ct original ip saddr . ct original proto-src . ct original proto-dst @fresh return
+add rule ip adhoc_relay to_fast meta l4proto tcp ct mark & 0x02000000 != 0 ct reply ip saddr . ct reply proto-src . ct original proto-dst @fresh return'
+	for counted in ' counter;' ''; do
+		nft -f - 2>/dev/null <<-EOF && return 0
+		add flowtable ip adhoc_relay ft { hook ingress priority filter; devices = { $devices };$counted }
+		add chain ip adhoc_relay to_fast
+		$young
+		add rule ip adhoc_relay to_fast ct state established flow add @ft
+		add chain ip adhoc_relay fast { type filter hook forward priority filter - 1; }
+		add rule ip adhoc_relay fast ct mark & 0x09000000 == 0x08000000 jump to_fast
+		EOF
+	done
+	echo "no flowtable in this kernel: the meetings the relay carries take the slow way" >&2
 }
+
+# The id of a key, 16 hex digits: the first 8 bytes of SHA-256 of "AdHoc Relay id" and the key. The rules know a key by it, and
+# a side names its key by it: no key travels, and none is in the kernel
+# kid <key>: its id in $K. From $KIDS, where `kids` put the ids of all the keys of the settings; a key that is not there is
+# hashed by itself. No command in brackets around it: a load starts no process for a key
+kid() {
+	K=${KIDS#* "$1":}
+	if [ "$K" != "$KIDS" ]; then K=${K%% *}; else K=$(printf 'AdHoc Relay id%s' "$1" | sha256sum | cut -c1-16); fi
+}
+
+# kids <all that the settings hold of keys>: the ids of all of them into $KIDS, " <key>:<id> <key>:<id> ... ", by one sha256sum -
+# not one for each key: with many users that was most of the time of a load. What is hashed of each key in a file of its own,
+# beside the state, for root alone, named by a number: no key in a command line. Whatever is 16 letters and digits is taken for
+# a key - one name too many costs nothing
+kids() {
+	KIDS=' '
+	keys=$(printf '%s\n' "$1" | tr ':, ' '\n\n\n' | grep -x '[A-Za-z0-9]\{16\}')
+	[ -n "$keys" ] || return 0
+	dir="$STATE/kid.$$"
+	mkdir -p "$STATE"
+	(umask 077; mkdir "$dir") || return 0
+	set --
+	i=1000
+	for k in $keys; do
+		i=$((i + 1))
+		printf 'AdHoc Relay id%s' "$k" > "$dir/$i"
+		set -- "$@" "$dir/$i"
+	done
+	KIDS=" $(sha256sum "$@" 2>/dev/null | KEYS="$keys" awk 'BEGIN { split(ENVIRON["KEYS"], k) } { printf "%s:%s ", k[NR], substr($1, 1, 16) }')"
+	rm -rf "$dir"
+}
+
+# The keys that bind a port, for `give` - it makes the keys of the knocks of them: "<id> <mark> <fixed port, 0 - any> <the end of
+# its last day in seconds, 0 - never> <key>" a line, in $STATE/binders. The mark: what a side of the key is noted with - the
+# number of its user and what it may; 0x0 - of no user. Beside its place till the rules have loaded
+binder() { kid "$1"; echo "$K $2 $3 $4 $1" >> "$STATE/binders.new"; }
 
 # the keys taken so far, the password first: one key may not open two things
 taken=
@@ -88,7 +157,8 @@ key() {
 	*[!A-Za-z0-9]*) echo "$2: the key must be letters and digits, not '$1': left out" >&2; return 1 ;;
 	esac
 	case " $taken " in
-	*" $1 "*) echo "$2: the key $1 is the password or another key already: left out" >&2; return 1 ;;
+	# a key that works is not written into the log
+	*" $1 "*) echo "$2: its key is the password or another key already: left out" >&2; return 1 ;;
 	esac
 	taken="$taken $1"
 }
@@ -97,6 +167,9 @@ key() {
 # "<name>:<write key>:<read key>[,<read key>...] ..."
 settled() {
 	ports=
+	mkdir -p "$STATE"
+	(umask 077; : > "$STATE/binders.new")
+	binder "$password" 0x0 0 0
 	for f in $1; do
 		port=${f%%:*} rest=${f#*:}
 		k=${rest%%:*}
@@ -112,7 +185,9 @@ settled() {
 		esac
 		key "$k" "the fixed port $port" || continue
 		ports="$ports $port"
-		echo "add element ip adhoc_relay fixed { $port . 0x$(printf %s "$k" | hex) }"
+		kid "$k"
+		echo "add element ip adhoc_relay binders { 0x$K }"
+		binder "$k" 0x0 "$port" 0
 	done
 	for r in $2; do
 		name=${r%%:*} rest=${r#*:}
@@ -120,10 +195,14 @@ settled() {
 		[ "$reads" != "$rest" ] || reads=
 		key "$w" "the record $name" || continue
 		recs="$recs $name"
-		echo "add element ip adhoc_relay writers { $first . 0x$(printf %s "$w" | hex) }"
-		for k in $(echo "$reads" | tr ',' ' '); do
+		kid "$w"
+		echo "add element ip adhoc_relay writers { 0x$K }"
+		# the read keys, a comma between: split by the shell itself
+		oifs=$IFS; IFS=,; set -- $reads; IFS=$oifs
+		for k in "$@"; do
 			key "$k" "a read key of the record $name" || continue
-			echo "add element ip adhoc_relay readers { $first . 0x$(printf %s "$k" | hex) }"
+			kid "$k"
+			echo "add element ip adhoc_relay readers { 0x$K }"
 		done
 	done
 }
@@ -150,49 +229,56 @@ counted() {
 }
 
 # keeps what the users counted in $USED, when the table is there: a load, a stop, a restart of the computer start from it. The
-# file is written only when it changes - the flash of a router wears with writes
+# file is written only when it changes - the flash of a router wears with writes. Whether the table is there by its quotas: a
+# listing of the table whole holds all its sets at once, megabytes with thousands of servers
 save() {
-	nft list table ip adhoc_relay >/dev/null 2>&1 || return 0
+	nft list quotas table ip adhoc_relay >/dev/null 2>&1 || return 0
 	now=$(counted)
 	[ "$now" = "$(cat "$USED" 2>/dev/null)" ] && return 0
 	mkdir -p "$(dirname "$USED")"
-	printf '%s\n' "$now" > "$USED.new" && mv "$USED.new" "$USED"
+	# the keys of the users are in it: for root alone
+	(umask 077; printf '%s\n' "$now" > "$USED.new") && mv "$USED.new" "$USED"
 }
 
 # The users, as commands of nft: "<of>:<key>:<expires>:<limit>[:<name>[:<tags>]] ...". Of: password; a fixed port; @<record> - a read key
 # of that record. Expires: YYYY-MM-DD, it opens nothing from the day after on; - never. Limit: megabytes the meetings of the user may
 # carry through this computer; - none; direct - nothing: the direct path only, its clients reach its server by a call, and a meeting
-# through this computer is refused. A user of a port gets a number, 1-255, its chains mark_<n> and count_<n>, and its quota or
-# counter a_<key>, starting from what $USED kept. The number stays its own through loads, as $STATE/users kept it: a meeting
-# going on carries it in its mark, and a user taken away or added must not move the others. The numbers and the names go to
-# $STATE/users, for the page too
+# through this computer is refused. A user of a port gets a number, 1-255; one with a limit, its chain
+# count_<n> and its quota a_<key> too, starting from what $USED kept - the packets of its meetings are counted, each one, and
+# they stay out of the fast path. One without a limit costs nothing after its knock: nothing of it is counted. The number
+# stays its own through loads, as $STATE/users kept it: a meeting going on carries it in its mark, and a user taken away or
+# added must not move the others. The numbers and the names go to $STATE/users, for the page too
 with_users() {
-	n=0 now=$(date +%s) list= ports_of=
-	# the numbers kept: those of the users still there are theirs, the others free; the next to give
-	before=$(cat "$STATE/users" 2>/dev/null)
-	next=$(cat "$STATE/users.next" 2>/dev/null)
-	case "$next" in ''|*[!0-9]*) next=1 ;; esac
+	n=0 now=$(date +%s) ports_of= dates=' '
 	for a in $1; do
 		IFS=: read -r of k expires limit name tags <<-EOF
 		$a
 		EOF
 		what="the user ${name:-$k}"
-		timeout= secs=
+		timeout= secs= end=
 		if [ -n "$expires" ] && [ "$expires" != - ]; then
-			end=$(date -d "$expires 23:59:59" +%s 2>/dev/null)
+			# a day asked of `date` once, however many users end on it
+			end=${dates#* "$expires":}
+			if [ "$end" != "$dates" ]; then
+				end=${end%% *}
+			else
+				end=$(date -d "$expires 23:59:59" +%s 2>/dev/null)
+				dates="$dates$expires:$end "
+			fi
 			case "$end" in ''|*[!0-9]*) echo "$what: the date '$expires' is not YYYY-MM-DD: left out" >&2; continue ;; esac
 			[ "$end" -gt "$now" ] || { echo "$what: expired on $expires: left out" >&2; continue; }
 			# in days and seconds: nft takes no long time in seconds alone
 			secs=$(((end - now) / 86400))d$(((end - now) % 86400))s
 			timeout=" timeout $secs"
 		fi
-		case "$limit" in ''|-) limit= ;; direct) ;; *[!0-9]*) echo "$what: the limit '$limit' is not a number of megabytes: left out" >&2; continue ;; esac
+		# a number with zeros in front is a number all the same - not one of base 8 for the shell: they go; of zeros alone - no limit
+		case "$limit" in ''|-) limit= ;; direct) ;; *[!0-9]*) echo "$what: the limit '$limit' is not a number of megabytes: left out" >&2; continue ;; *) limit=${limit#"${limit%%[!0]*}"} ;; esac
 		key "$k" "$what" || continue
-		h=0x$(printf %s "$k" | hex)
 		case "$of" in
 		@*)
 			case " $recs " in *" ${of#@} "*) ;; *) echo "$what: no record ${of#@}: left out" >&2; continue ;; esac
-			echo "add element ip adhoc_relay readers { $first . $h$timeout }"
+			kid "$k"
+			echo "add element ip adhoc_relay readers { 0x$K$timeout }"
 			continue
 			;;
 		password) ;;
@@ -200,124 +286,204 @@ with_users() {
 		esac
 		[ "$n" -lt 255 ] || { echo "$what: 255 users of ports at most: left out" >&2; continue; }
 		n=$((n + 1))
-		ports_of="$ports_of$k ${of} ${secs:-none} ${limit:--} ${name:--}
+		ports_of="$ports_of$k ${of} ${secs:-none} ${limit:--} ${end:-0} ${name:--}
 "
 	done
-	# the numbers: each user kept its own; the new ones get the smallest free
-	ids=" $(printf '%s\n' "$before" | awk -v keys="$(printf '%s' "$ports_of" | awk '{ print $1 }' | tr '\n' ' ')" '
-		BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
-		$2 in want { printf "%s ", $1 }') "
-	while read -r k of secs limit name; do
-		[ -n "$k" ] || continue
-		n=$(printf '%s\n' "$before" | awk -v k="$k" '$2 == k { print $1 }')
-		if [ -z "$n" ]; then
-			# round the 255, from after the last given: the number of a user taken away comes back last - a meeting of it still
-			# going on is dropped, not counted to another
-			n=$next
-			while [ "$n" -gt 255 ] && n=1; case "$ids" in *" $n "*) true ;; *) false ;; esac; do n=$((n + 1)); done
-			ids="$ids$n " next=$((n + 1))
-		fi
-		[ "$secs" = none ] && timeout= || timeout=" timeout $secs"
-		# the mark of its meetings; of the direct path only, a bit more: the SYN of a client is refused
-		mark=0x08
-		[ "$limit" = - ] && limit=
-		[ "$limit" = direct ] && limit= mark=0x18
-		h=0x$(printf %s "$k" | hex)
-		if [ "$of" = password ]; then
-			echo "add element ip adhoc_relay passwords { $h$timeout }"
-		else
-			echo "add element ip adhoc_relay fixed { $of . $h$timeout }"
-		fi
-		id=$(printf '0x%02x0000' "$n")
-		used=$(awk -v k="$k" '$1 == k { print $2 }' "$USED" 2>/dev/null)
-		echo "add chain ip adhoc_relay mark_$n"
-		echo "add rule ip adhoc_relay mark_$n update @port_user { udp dport : $(printf '%s%02x0000' "$mark" "$n") }"
-		echo "add element ip adhoc_relay user_mark { $h$timeout : jump mark_$n }"
-		echo "add chain ip adhoc_relay count_$n"
-		if [ -n "$limit" ]; then
-			echo "add quota ip adhoc_relay a_$k { over $((limit * 1048576)) bytes used ${used:-0} bytes; }"
-			echo "add rule ip adhoc_relay count_$n quota name \"a_$k\" drop"
-		else
-			echo "add counter ip adhoc_relay a_$k { packets 0 bytes ${used:-0}; }"
-			echo "add rule ip adhoc_relay count_$n counter name \"a_$k\""
-		fi
-		echo "add element ip adhoc_relay user_count { $id$timeout : goto count_$n }"
-		list="$list$n $k $name
-"
-	done <<-EOF
+	# The numbers, and the commands of each user: by one awk for all of them - not a few processes for each user. Each user kept
+	# its own number, as $STATE/users has it; a new one gets the next free one round the 255, from after the last given: the
+	# number of a user taken away comes back last - a meeting of it still going on is dropped, not counted to another. Of the
+	# direct path only: one bit more in the number its side is noted with - a client that would meet that side is refused,
+	# whoever else knocks at the port; with a limit: the bit of the count. The key of a user binds until its last day: the kernel
+	# lets it go itself. What a side of it is noted with at a knock goes to `give`, in $STATE/binders: it puts it into the rules
+	# with the key of the knocks of the side, at its bind. With a limit: its chain and its quota, from what $USED kept; with
+	# none nothing is counted, no chain - a meeting that began while the user had a limit, its mark has the bit of the count,
+	# goes on, uncounted.
+	# The keys are in $STATE/users: for root alone. Beside their places: put there once the rules have loaded with them - a load
+	# that fails leaves the numbers as the rules there are have them. A key goes to awk by its input and the environment: not
+	# in a command line
+	mkdir -p "$STATE"
+	(umask 077; : > "$STATE/users.new")
+	KIDS="$KIDS" BEFORE="$STATE/users" NEXT="$STATE/users.next" USED="$USED" LIST="$STATE/users.new" BINDERS="$STATE/binders.new" NEXT_NEW="$STATE/users.next.new" awk '
+		NF >= 6 { line[++lines] = $0; want[$1] = 1 }
+		END {
+			n = split(ENVIRON["KIDS"], pair, " ")
+			for (i = 1; i <= n; i++) { c = index(pair[i], ":"); kid[substr(pair[i], 1, c - 1)] = substr(pair[i], c + 1) }
+			while ((getline l < ENVIRON["BEFORE"]) > 0) { split(l, f, " "); if (f[2] in want && !(f[2] in number)) { number[f[2]] = f[1] + 0; taken[f[1] + 0] = 1 } }
+			while ((getline l < ENVIRON["USED"]) > 0) { split(l, f, " "); used[f[1]] = f[2] }
+			nxt = 1
+			if ((getline l < ENVIRON["NEXT"]) > 0 && l ~ /^[0-9]+$/) nxt = l + 0
+			for (i = 1; i <= lines; i++) {
+				split(line[i], f, " ")
+				k = f[1]; of = f[2]; secs = f[3]; limit = f[4]; ends = f[5]; name = f[6]
+				if (k in number) n = number[k]
+				else {
+					n = nxt
+					for (;;) { if (n > 255) n = 1; if (!(n in taken)) break; n++ }
+					taken[n] = 1; nxt = n + 1
+				}
+				timeout = secs == "none" ? "" : " timeout " secs
+				bits = "08"
+				if (limit == "-") limit = ""
+				if (limit == "direct") { limit = ""; bits = "18" }
+				if (limit != "") bits = "09"
+				printf "add element ip adhoc_relay binders { 0x%s%s }\n", kid[k], timeout
+				printf "%s 0x%s%02x0000 %s %s %s\n", kid[k], bits, n, of == "password" ? 0 : of, ends, k >> ENVIRON["BINDERS"]
+				if (limit != "") {
+					printf "add chain ip adhoc_relay count_%d\n", n
+					printf "add quota ip adhoc_relay a_%s { over %.0f bytes used %.0f bytes; }\n", k, limit * 1048576, k in used ? used[k] : 0
+					printf "add rule ip adhoc_relay count_%d quota name \"a_%s\" drop\n", n, k
+					printf "add element ip adhoc_relay user_count { 0x%02x0000%s : goto count_%d }\n", n, timeout, n
+				} else
+					printf "add element ip adhoc_relay user_count { 0x%02x0000%s : accept }\n", n, timeout
+				printf "%d %s %s\n", n, k, name > ENVIRON["LIST"]
+			}
+			print nxt > ENVIRON["NEXT_NEW"]
+		}' <<-EOF
 	$ports_of
 	EOF
-	mkdir -p "$STATE"
-	printf '%s' "$list" > "$STATE/users"
-	echo "$next" > "$STATE/users.next"
 }
 
-# the elements of a set of the table there is, as a command that adds them anew - their time full again: the ports given and their
-# ids live on through a load, as their sides will not ask again
-kept() {
-	nft list set ip adhoc_relay "$1" 2>/dev/null | awk -v set="$1" '
-		/elements = \{/ { on = 1; sub(/.*elements = \{/, "") }
-		on { all = all " " $0; if (index($0, "}")) on = 0 }
-		END {
-			sub(/\}.*/, "", all)
-			n = split(all, it, ",")
-			for (i = 1; i <= n; i++) {
-				sub(/ (timeout|expires) .*/, "", it[i]); gsub(/^ +| +$/, "", it[i])
-				if (it[i] != "") s = s (s == "" ? "" : ", ") it[i]
-			}
-			if (s != "") print "add element ip adhoc_relay " set " { " s " }"
-		}'
+# The meetings of the users that are no more - taken away, or past their day - end here, where the tool `conntrack` is: the
+# connections that carry the number of each are deleted, once, by this load. No rule looks at a packet for it, nothing is kept
+# for it. A meeting of a user with a limit goes nowhere without it too; one of a user with no limit is not looked at after its
+# knock, and without the tool goes on until its sides end it. The numbers: $STATE/users as the rules of before had them, and
+# $STATE/users.new as these have - a number whose key is another now is of a user that is no more all the same
+ended() {
+	[ -f "$STATE/users" ] && [ -f "$STATE/users.new" ] || return 0
+	left=$(NEW="$STATE/users.new" awk '
+		BEGIN { while ((getline l < ENVIRON["NEW"]) > 0) { split(l, f, " "); now[f[1] " " f[2]] = 1 } }
+		NF >= 2 && !(($1 " " $2) in now) { print $1 }' "$STATE/users")
+	[ -n "$left" ] || return 0
+	if ! command -v conntrack >/dev/null 2>&1; then
+		echo "users taken away: the meetings going on of those with no limit go on until their sides end them - with the package conntrack installed they end at once" >&2
+		return 0
+	fi
+	for n in $left; do
+		case "$n" in ''|*[!0-9]*) continue ;; esac
+		# the bit of a meeting and the number: no connection of anything else on this computer has both
+		conntrack -D -m "$(printf '0x08%02x0000' "$n")/0x08ff0000" >/dev/null 2>&1
+	done
+	return 0
 }
 
-# the ports marked by the users that knocked at them, anew - their time full again: a meeting at one between a load and the next
-# knock is counted all the same
-kept_marks() {
-	nft list map ip adhoc_relay port_user 2>/dev/null | awk '
-		/elements = \{/ { on = 1; sub(/.*elements = \{/, "") }
-		on { all = all " " $0; if (index($0, "}")) on = 0 }
-		END {
-			sub(/\}.*/, "", all)
-			n = split(all, it, ",")
-			for (i = 1; i <= n; i++) {
-				# "<port> timeout 8s expires 5s : <mark>"
-				if (!match(it[i], /[0-9]+/)) continue
-				p = substr(it[i], RSTART, RLENGTH); v = it[i]; sub(/.*: */, "", v); gsub(/ /, "", v)
-				if (v != "") s = s (s == "" ? "" : ", ") p " : " v
+# What the table there is holds that outlives a load, as commands of nft that add it anew - each set listed by an nft of its
+# own, all of them read by one awk. Not the table whole by one nft: with thousands of servers it holds all of it in its memory
+# at once - 7 MB of 5000 servers, a router of 64 MB fell over -, a set at a time takes less than one. Under the lock of `give`
+# nothing is bound meanwhile; what the packets change meanwhile a moment apart is what they would change a moment later:
+#   the ports given - their sides will not bind again -, who holds them, the ports open, the addresses that guess, the keys of
+#   calls, the addresses of the servers that knock, the sides the users noted by their knocks - a meeting between a load and the
+#   next knock is counted all the same: each with its time full again;
+#   the meetings of the last day, each with the time it had left - `expires` -: when a port was used last, and from where;
+#   the keys of the knocks of the sides bound, each with the time it had left - of the journal of `give`, see below.
+# All of it into the file $1, in parts of 500, added after the table: with thousands of servers it is thousands of elements in
+# each set, and in one transaction with the table - the old one still there - they took more memory than a router has to
+# spare: with 8000 servers the transaction failed, and the table came without any of them. A part that fails loses that part
+# alone. Meanwhile, a second or two: `give` gives no port under the lock; a knock that comes before its key is back is dropped,
+# as any knock with a key not known, and counted nowhere - its side knocks again; a SYN of a server before who holds the port
+# and whether it is open are back is dropped, and the server dials again; each knock notes both anew too
+# A line of the listing holds whole elements, a comma after each but the last: taken as it is - only the times of the first
+# cut away -, the elements of a set one command, a line an element. The lines of elements are most of the listing, thousands
+# with thousands of servers, and the awk of a router is slow with them: no pattern, no word taken apart - a few microseconds a
+# line -, nothing gathered in a string - that grows with the square of its length
+carried() {
+	{
+		for s in given holder guessing calls open servers met; do nft list set ip adhoc_relay "$s"; done
+		for s in side_user addr_user; do nft list map ip adhoc_relay "$s"; done
+	} 2>/dev/null | awk -v later="$1" '
+		BEGIN {
+			n = split("given holder guessing calls open servers side_user addr_user", w, " ")
+			for (i = 1; i <= n; i++) kind[w[i]] = "full"
+			kind["met"] = "left"
+			n = 0
+		}
+		function put(t) { print t > later }
+		# the command ends: its last element without the comma
+		function done() {
+			if (!n) return
+			if (substr(last, length(last)) == ",") last = substr(last, 1, length(last) - 1)
+			put(last); put("}")
+			n = 0
+		}
+		# The time of an element cut away: "<port> . <address> timeout 1m expires 30s," -> "<port> . <address> ,", of a map
+		# "<key> timeout 1m expires 30s : <value>," -> "<key> : <value>,". An element with a time is a line of its own; a line
+		# of more, were there one, is cut by a pattern
+		function cut(t,    c, v) {
+			c = index(t, " timeout ")
+			if (!c) c = index(t, " expires ")
+			if (!c) return t
+			v = index(t, ",")
+			if (v && v < length(t)) { gsub(/ (timeout|expires) [^,:]*/, " ", t); return t }
+			v = index(t, " : ")
+			if (v) return substr(t, 1, c - 1) substr(t, v)
+			return substr(t, 1, c - 1) (index(t, ",") ? "," : "")
+		}
+		function element(line) {
+			if (index(line, "}")) { line = substr(line, 1, index(line, "}") - 1); on = 0 }
+			if (k != "") {
+				if (k == "full") line = cut(line)
+				if (!n) put("add element ip adhoc_relay " name " {"); else put(last)
+				last = line
+				if (++n == 500) done()
 			}
-			if (s != "") print "add element ip adhoc_relay port_user { " s " }"
-		}'
-}
-
-# the meetings of the last day, anew - each with the time it had left: when a port was used last, and from where, outlives a load
-met_kept() {
-	nft list set ip adhoc_relay met 2>/dev/null | awk '
-		/elements = \{/ { on = 1; sub(/.*elements = \{/, "") }
-		on { all = all " " $0; if (index($0, "}")) on = 0 }
+			if (!on) done()
+		}
+		on { element($0); next }
+		$1 == "set" || $1 == "map" { name = $2; k = kind[name]; next }
+		$1 == "chain" || $1 == "quota" || $1 == "counter" || $1 == "flowtable" { name = ""; k = ""; next }
+		index($0, "elements = {") { on = 1; element(substr($0, index($0, "elements = {") + 12)) }'
+	# The keys of the knocks of the sides bound, in the map of each `rebind` - with the address and without it -, each with the time
+	# it has left: of the journal of `give`, not of the rules. A listing of a map of thousands of them takes more memory than a
+	# router has left then - with 8000 servers waiting, the kernel killed nft for it, and the keys were lost. The journal: a line
+	# for each bind, "<id> <port> <id of the key> <address> <key of the knocks> <ends> <mark> <slot>", read as `give` reads it at
+	# its start - the last lines of a side are where it is, a port is of the side that bound it last; a key of no binder now -
+	# taken away, its day over - is left out, and the mark is that of the key now
+	[ -s "$STATE/bound" ] && [ -f "$STATE/binders.new" ] && awk -v now="$(date +%s)" -v later="$1" '
+		FILENAME == ARGV[1] { mark[$1] = $2; fixed[$1] = $3 + 0; ends[$1] = $4 + 0; next }
+		NF >= 8 && $8 ~ /^[0-3]$/ && $6 + 0 > now {
+			id = $1; was = $2 " " $4 " " $5
+			# bound anew since - another port, address or key of knocks -: what it had before is of nobody
+			if (seen[id] != was) { for (s = 0; s < 4; s++) delete end[id, s]; seen[id] = was }
+			owner[$2] = id; port[id] = $2; kid[id] = $3; addr[id] = $4; knock[id] = $5; end[id, $8] = $6 + 0
+		}
+		# after what the sets gave, in the same file
+		function out(t) { print t >> later }
 		END {
-			sub(/\}.*/, "", all)
-			n = split(all, it, ",")
-			for (i = 1; i <= n; i++) {
-				# "<port> . <client> . <its port> . <mark> [timeout 1d] expires 23h59m58s120ms"
-				if (!match(it[i], / expires [0-9a-z]+/)) continue
-				left = substr(it[i], RSTART, RLENGTH); e = it[i]
-				sub(/ (timeout|expires) .*/, "", e); gsub(/^ +| +$/, "", e)
-				s = s (s == "" ? "" : ", ") e left
+			for (s = 0; s < 4; s++) {
+				n = 0
+				for (id in port) {
+					k = kid[id]
+					if (owner[port[id]] != id || !(k in mark) || (fixed[k] && fixed[k] != port[id]) || (ends[k] && ends[k] <= now) || end[id, s] <= now) continue
+					left = end[id, s] - now
+					with[++n] = port[id] " . " addr[id] " . 0x" knock[id] " timeout " left "s : " mark[k]
+					any[n] = port[id] " . 0x" knock[id] " timeout " left "s"
+				}
+				for (i = 1; i <= n; i += 500) {
+					last = i + 499 < n ? i + 499 : n
+					out("add element ip adhoc_relay bound" s " {"); for (j = i; j <= last; j++) out(with[j] (j < last ? "," : "")); out("}")
+					out("add element ip adhoc_relay bound_any" s " {"); for (j = i; j <= last; j++) out(any[j] (j < last ? "," : "")); out("}")
+				}
 			}
-			if (s != "") print "add element ip adhoc_relay met { " s " }"
-		}'
+		}' "$STATE/binders.new" "$STATE/bound"
 }
 
 case "$1" in
 load)
-	password=$2 first=${3:-40000} last=${4:-49999} wait=${5:-60} tries=${6:-5} block=${7:-600} guard=${8:-1} short=${9:-20} guesses=${10:-5}
-	fixed=${11} records=${12} users=${13}
+	# by the arguments, when there are any; else by the environment
+	if [ $# -gt 1 ]; then
+		password=$2 first=$3 last=$4 wait=$5 tries=$6 block=$7 guard=$8 short=$9 guesses=${10} fixed=${11} records=${12} users=${13} log=${14} connections=${15} dial=${16} rebind=${17}
+	else
+		password=$PASSWORD first=$FIRST last=$LAST wait=$WAIT tries=$TRIES block=$BLOCK guard=$GUARD short=$SHORT guesses=$GUESSES
+		fixed=$FIXED records=$RECORDS users=$USERS log=$LOG connections=$CONNECTIONS dial=$DIAL rebind=$REBIND
+	fi
+	first=${first:-40000} last=${last:-49999} wait=${wait:-60} tries=${tries:-5} block=${block:-600} guard=${guard:-1} short=${short:-20} guesses=${guesses:-5} connections=${connections:-0}
+	dial=${dial:-31} rebind=${rebind:-30}
 	if [ "${#password}" -ne 16 ]; then
 		echo "the password must be 16 characters" >&2
 		exit 1
 	fi
-	case "$first$last$wait$tries$block$guard$short$guesses" in
+	case "$first$last$wait$tries$block$guard$short$guesses$connections$dial$rebind" in
 	*[!0-9]*)
-		echo "the ports, wait, tries, block, guard, short and guesses must be numbers" >&2
+		echo "the ports, wait, tries, block, guard, short, guesses, connections, dial and rebind must be numbers" >&2
 		exit 1
 		;;
 	esac
@@ -325,54 +491,132 @@ load)
 		echo "the first port answers requests, the others are of meeting: the last port must be above the first" >&2
 		exit 1
 	fi
-	# the ports and their ids, when the table there is takes the id after a password of 16: of AdHoc Relay before, the ports given
-	# are kept alone, and free again in `wait` seconds
-	keep=$(kept given; nft list set ip adhoc_relay owned 2>/dev/null | grep -q "@ih,128,64" && kept owned; kept holder; kept guessing; kept calls; kept_marks; met_kept)
-	# the guard off, or no short meeting allowed at all: its lines left out
-	off=
-	if [ "$guard" = 0 ] || [ "$guesses" = 0 ]; then off='/# guard$/d'; fi
+	# a time of 0 never ends for nft - a port never free again, a block for ever -, and no try at all loads no rules
+	if [ "$wait" -lt 1 ] || [ "$tries" -lt 1 ] || [ "$block" -lt 1 ]; then
+		echo "wait, tries and block must be 1 or more" >&2
+		exit 1
+	fi
+	# A try of dialing of a server: its system sends the SYN after 0, 1, 3, 7 and 15 s - each time twice as long -, and the next
+	# try comes when it ends. The longest time between two SYNs is half the try, the time where the server waits is known is that
+	# and 2 s more - 5 s at least. A try of other seconds than these would leave a longer time: not taken
+	case "$dial" in
+	3|7|15|31) window=$(( (dial + 1) / 2 + 2 )); [ "$window" -ge 5 ] || window=5 ;;
+	*) echo "dial must be 3, 7, 15 or 31 seconds" >&2; exit 1 ;;
+	esac
+	if [ "$rebind" -lt 1 ] || [ "$rebind" -gt 60 ]; then
+		echo "rebind must be 1 to 60 minutes" >&2
+		exit 1
+	fi
+	# the guard off, or no short meeting allowed at all: its lines left out. The log not turned on: its lines too
+	off= strip=
+	if [ "$guard" = 0 ] || [ "$guesses" = 0 ]; then off=1 strip='/# guard$/d;'; fi
+	[ "$log" = 1 ] || strip="$strip/# log\$/d;"
+	# The meetings of one address at once: counted only with a number set. The kernel counts them by a module of its own -
+	# nft_connlimit, kmod-nft-connlimit of OpenWrt -: asked once, by a table of one rule; without it the relay loads all the
+	# same, with no such limit, and says so
+	if [ "$connections" -gt 0 ]; then
+		if printf 'table ip adhoc_relay_probe { set c { type ipv4_addr; size 2; flags dynamic; }; chain p { add @c { ip saddr ct count over 1 } drop; }; }\n' | nft -f - 2>/dev/null; then
+			nft delete table ip adhoc_relay_probe 2>/dev/null
+		else
+			echo "the limit of connections of one address is not kept: this kernel counts none - the package kmod-nft-connlimit of OpenWrt, the module nft_connlimit of a Linux computer" >&2
+			connections=0
+		fi
+	fi
+	[ "$connections" -gt 0 ] || strip="$strip/# connections\$/d;"
+	# The sets anyone can fill - the addresses that ask, knock wrong, are blocked, guess; the meetings of the last seconds, and
+	# of the last day - have a size: it bounds the memory of the kernel a flood of packets from made-up addresses can take, some
+	# 250 bytes an element. By the memory of this computer: full, they take a tenth of it at most - 6 MB of a router of 64 MB,
+	# not the 50 MB that are nothing to a server. A set that is full notes no new address till its old ones end: the count
+	# fails closed for that minute
+	mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)
+	if [ "${mem:-0}" -le 96 ]; then addresses=2048 fresh=8192 met=2048
+	elif [ "$mem" -le 192 ]; then addresses=4096 fresh=16384 met=4096
+	elif [ "$mem" -le 384 ]; then addresses=8192 fresh=32768 met=8192
+	else addresses=16384 fresh=65535 met=8192
+	fi
 	[ "$short" -gt 0 ] || short=20
 	taken=$password
+	# the ids of all the keys, at once
+	kids "$password $fixed $records $users"
 	# what the users counted so far: the new table starts from it
 	save
 	settle=$(settled "$fixed" "$records"; with_users "$users")
-	# one transaction: the old table goes as the new one comes - no packet in between unruled; a table that fails leaves the old
-	{
-		echo 'add table ip adhoc_relay'
-		echo 'delete table ip adhoc_relay'
-		sed -e "s/@WAIT@/${wait}s/g" -e "s/@BLOCK@/${block}s/g" -e "s/@TRIES@/$tries/g" -e "s/@SHORT@/${short}s/g" -e "s/@GUESSES@/$guesses/g" "$TABLE" | if [ -n "$off" ]; then sed "$off"; else cat; fi
-		[ -n "$settle" ] && printf '%s\n' "$settle"
-		[ -n "$keep" ] && printf '%s\n' "$keep"
-	} | nft -D password=0x$(printf %s "$password" | hex) -D ports=$first-$last -D asks=$first -f - || exit 1
+	# What outlives the load, taken last, and under the lock `give` takes for each port it gives: a port given while the table is
+	# read and the new one put in its place would be of neither - its server answered, the port forgotten. The ports open stay
+	# open: a load - Save & Apply - refuses no client of a server that waits; its SYN is dropped, and meets at the next try of
+	# the server
+	locked=
+	if command -v flock >/dev/null 2>&1 && mkdir -p "$STATE" && exec 9>"$STATE/lock" && flock 9; then locked=1; fi
+	[ -n "$locked" ] || echo "no flock on this computer: a port bound in the moment of this load may be lost - its server binds again by itself" >&2
+	# into files of the memory, as only root reads them: the keys of the knocks are among them
+	mkdir -p "$STATE"
+	later="$STATE/later"
+	rm -f "$later"
+	(umask 077; carried "$later")
+	# one transaction: the old table goes as the new one comes - no packet in between unruled; a table that fails leaves the old.
+	# The password among its lines, not an argument of nft
+	transaction() {
+		{
+			kid "$password"
+			echo "define binder = 0x$K"
+			echo "define ports = $first-$last"
+			echo "define asks = $first"
+			echo 'add table ip adhoc_relay'
+			echo 'delete table ip adhoc_relay'
+			sed -e "s/@WAIT@/${wait}s/g" -e "s/@BLOCK@/${block}s/g" -e "s/@TRIES@/$tries/g" -e "s/@SHORT@/${short}s/g" -e "s/@GUESSES@/$guesses/g" -e "s/@CONNECTIONS@/$connections/g" -e "s/@ADDRESSES@/$addresses/g" -e "s/@FRESH@/$fresh/g" -e "s/@MET@/$met/g" -e "s/@WINDOW@/${window}s/g" -e "s/@KEYS@/$(( rebind * 2 ))m/g" ${strip:+-e "$strip"} "$TABLE"
+			[ -n "$settle" ] && printf '%s\n' "$settle"
+		} | nft -f -
+	}
+	transaction || { rm -f "$later"; exit 1; }
+	# What the table of before held: a command of 500 an nft. One that fails - an element the new table does not take, of rules
+	# of another release - loses its part alone, said once; its sides bind again
+	[ ! -s "$later" ] || awk '{ print | "nft -f - 2>/dev/null" } $0 == "}" { if (close("nft -f - 2>/dev/null")) lost = 1 }
+		END { if (lost) print "a part of what the rules of before held - the ports given, the sides noted - does not load into these: left behind" > "/dev/stderr" }' "$later"
+	rm -f "$later"
+	[ -z "$locked" ] || { flock -u 9; exec 9>&-; }
+	# the users that are no more open nothing now: their meetings going on end too
+	ended
+	# the numbers of the users as the rules loaded have them now
+	[ -f "$STATE/users.new" ] && mv "$STATE/users.new" "$STATE/users"
+	[ -f "$STATE/binders.new" ] && mv "$STATE/binders.new" "$STATE/binders"
+	[ -f "$STATE/users.next.new" ] && mv "$STATE/users.next.new" "$STATE/users.next"
 	# a router forwards already; a computer starts to
-	if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ] && ! echo 1 > /proc/sys/net/ipv4/ip_forward; then
-		echo "cannot turn on the forwarding of packets" >&2
-		exit 1
+	if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
+		if ! echo 1 > /proc/sys/net/ipv4/ip_forward; then
+			echo "cannot turn on the forwarding of packets" >&2
+			exit 1
+		fi
+		# noted: the one who removes AdHoc Relay is told that it stays on
+		: > "$STATE/forwarding"
 	fi
 	brief
 	fast
 	if command -v fw4 >/dev/null; then
 		# the requests come to the input chain only with the right password: the rest the table drops before. Of a meeting only
 		# its first packet is let through here: the rest goes on to fw4 as any connection there is - to its flow offloading
-		# too, when it is on, and the meetings the relay carries take the fast path of the router, or its hardware
-		# The meetings of users are counted packet by packet: with the offloading of fw4 on, they are let through here, all
-		# their packets - not to its fast path, where nothing would count them. One rule more for each packet the router forwards
-		# then: only while there are users of ports
+		# too, when it is on, and the meetings the relay carries take the fast path of the router, or its hardware.
+		# The meetings of users with a limit are counted packet by packet, by these rules. The offloading of fw4 takes every
+		# connection the router forwards onto its own fast path before anything of this is asked - its rule stands above what is
+		# included -, and nothing counts them there: with a user that has a limit and its offloading on, it is said
 		a=0 b=0
-		forward='ct state new ct mark & 0x0c000000 != 0 accept comment "!adhoc-relay: the meetings and the calls"'
-		if [ -s "$STATE/users" ] && [ "$(uci -q get firewall.@defaults[0].flow_offloading)" = 1 ]; then
-			forward="$forward
-ct mark & 0x00ff0000 != 0 accept comment \"!adhoc-relay: the meetings of users, counted\""
-		fi
+		# by more than the bits of the mark: what the relay sends on had its destination changed - another program that marks
+		# connections with the same bits is not let through by this
+		forward='ct state new ct status dnat ct mark & 0x0c000000 != 0 accept comment "!adhoc-relay: the meetings and the calls"'
+		case "$settle" in *'add quota ip adhoc_relay'*)
+			if [ "$(uci -q get firewall.@defaults[0].flow_offloading)" = 1 ]; then
+				echo "Software flow offloading of the firewall is on: the meetings of users with a limit take its fast path, not counted and not limited. Turn it off - Network > Firewall - to count them: the other meetings have a fast path of AdHoc Relay then" >&2
+			fi
+			;;
+		esac
 		include "$FW4" "$forward" && a=1
 		include "$FW4_IN" "udp dport $first accept comment \"!adhoc-relay: the requests for a port\"" && b=1
 		[ $a$b != 00 ] && reload_fw4
 	fi
 	if iptables_on; then
-		if ! iptables -C FORWARD $MEETINGS 2>/dev/null; then
+		if ! iptables -C FORWARD $MEETINGS 2>/dev/null || ! iptables -C FORWARD $CALLS 2>/dev/null; then
+			# those of a release before, too
+			chain_off FORWARD
 			iptables -I FORWARD 1 $MEETINGS || exit 1
-		fi
-		if ! iptables -C FORWARD $CALLS 2>/dev/null; then
 			iptables -I FORWARD 1 $CALLS || exit 1
 		fi
 		if ! iptables -C INPUT -p udp --dport "$first" -m comment --comment adhoc-relay -j ACCEPT 2>/dev/null; then
@@ -386,6 +630,22 @@ save)
 	save
 	exit 0
 	;;
+unblock)
+	# only an IPv4 address and a port, as they are written: they go into a command of nft
+	case "$2" in ''|*[!0-9.]*) echo "usage: $0 unblock <address> [<port>]" >&2; exit 2 ;; esac
+	case "$3" in *[!0-9]*) echo "usage: $0 unblock <address> [<port>]" >&2; exit 2 ;; esac
+	# its count goes with the block: the next wrong one would block it again at once
+	if [ -n "$3" ]; then
+		nft delete element ip adhoc_relay guessing "{ $2 . $3 }" 2>/dev/null
+		done=$?
+		nft delete element ip adhoc_relay short "{ $2 . $3 }" 2>/dev/null
+	else
+		nft delete element ip adhoc_relay blocked "{ $2 }" 2>/dev/null
+		done=$?
+		nft delete element ip adhoc_relay wrong "{ $2 }" 2>/dev/null
+	fi
+	exit "$done"
+	;;
 unload)
 	save
 	nft delete table ip adhoc_relay 2>/dev/null
@@ -395,14 +655,13 @@ unload)
 		reload_fw4
 	fi
 	if iptables_on; then
-		while iptables -D FORWARD $MEETINGS 2>/dev/null; do :; done
-		while iptables -D FORWARD $CALLS 2>/dev/null; do :; done
+		chain_off FORWARD
 		input_off
 	fi
 	exit 0
 	;;
 *)
-	echo "usage: $0 load <password> <first port> <last port> <wait seconds> <tries> <block seconds> [<guard 1|0> <short seconds> <guesses> [<fixed ports> [<records> [<users>]]]] | save | unload" >&2
+	echo "usage: $0 load [<password> <first port> <last port> <wait seconds> <tries> <block seconds> [<guard 1|0> <short seconds> <guesses> [<fixed ports> [<records> [<users> [<log 1|0> [<connections>]]]]]]] | save | unload | unblock <address> [<port>]; load without arguments: the settings by the environment, PASSWORD FIRST LAST WAIT TRIES BLOCK GUARD SHORT GUESSES FIXED RECORDS USERS LOG" >&2
 	exit 2
 	;;
 esac

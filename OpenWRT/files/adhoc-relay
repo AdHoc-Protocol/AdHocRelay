@@ -6,7 +6,8 @@
 //                          `users`, `tags`; a
 //                          part left out stays as it is, a part given replaces it whole - checks it all, writes /etc/config/adhoc-relay
 //                          and loads it: the meetings going on go on. Answers as `api get`; `{ "error": ... }` and the code 1 when
-//                          something is wrong - nothing written then.
+//                          something is wrong, or when the rules do not load with it - nothing kept then: the settings of
+//                          before are written back and loaded.
 // The same JSON as `adhoc-relay api` of a Linux computer: a program needs not know which of the two the relay is. The form of it
 // is in the README, section API.
 
@@ -55,7 +56,8 @@ function pretty(t) {
 	return replace(t, '>', ARROW);
 }
 // ✏️<write key>[👀<read key>]👉<relay>:<port>
-const REPORT = /^!([A-Za-z0-9]{16})(\?([A-Za-z0-9]{16}))?>([^\s:@=,!?>]+):([0-9]+)$/;
+// the relay: a name or an address, of what names are made of - as `give` and the command of a Linux computer take it
+const REPORT = /^!([A-Za-z0-9]{16})(\?([A-Za-z0-9]{16}))?>([A-Za-z0-9][A-Za-z0-9._-]*):([0-9]{1,5})$/;
 
 function release() {
 	return trim(fs.readfile('/usr/share/adhoc-relay/version') ?? '') || null;
@@ -74,6 +76,15 @@ function settings(c) {
 		guard: s.guard != '0',
 		short: +(s.short ?? 20),
 		guesses: +(s.guesses ?? 5),
+		// the meetings one address of a client may have at once; 0 - any number
+		connections: +(s.connections ?? 0),
+		// the times of the servers, told to them at a bind: how often they knock, seconds; a try of their dialing, seconds; how
+		// often they bind again, minutes
+		knock: +(s.knock ?? 20),
+		dial: +(s.dial ?? 31),
+		rebind: +(s.rebind ?? 30),
+		// the log of the last 10 minutes: noted only while it is on
+		log: s.log == '1',
 		address: s.dns ?? ''
 	};
 }
@@ -105,18 +116,18 @@ function get() {
 	};
 }
 
-// The tags of a user as one number of 8 bytes, a tag each: sorted, the last repeated to fill the 8; -1 - none. A selection
-// compares bytes, nothing else
+// The tags of a user as one number of 8 bytes, a tag each: sorted, the last repeated to fill the 8; null - none: -1 is a number
+// of tags too, of the tag 255 alone. A selection compares bytes, nothing else
 function packed(tags) {
 	let t = sort(uniq(tags ?? []), (a, b) => a - b), n = 0;
 	if (!length(t))
-		return -1;
+		return null;
 	for (let i = 0; i < 8; i++)
 		n = (n << 8) | t[i < length(t) ? i : length(t) - 1];
 	return n;
 }
 function has(n, tag) {
-	if (n == -1)
+	if (n == null)
 		return false;
 	for (let i = 0; i < 64; i += 8)
 		if (((n >> i) & 255) == tag)
@@ -157,16 +168,48 @@ function int_in(v, lo, hi) {
 	return type(v) == 'int' && v >= lo && v <= hi;
 }
 
-// What `set` is given, merged into what there is and checked as `rules load` and the page check it: the list of what is wrong
-function check(want) {
+// a day there is, YYYY-MM-DD: `rules` leaves out a user whose last day is none - February 31
+function day_ok(text) {
+	const m = match(text, /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/);
+	if (!m)
+		return false;
+	const y = int(m[1], 10), month = int(m[2], 10), d = int(m[3], 10);
+	const days = [ 31, (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 ];
+	return month >= 1 && month <= 12 && d >= 1 && d <= days[month - 1];
+}
+
+// Software flow offloading of the firewall is on: it carries every connection past the count of a limit
+function flow_offloading() {
+	let on = false;
+	cursor().foreach('firewall', 'defaults', (d) => { if (d.flow_offloading == '1') on = true; });
+	return on;
+}
+
+// What `set` is given, merged into what there is and checked as `rules load` and the page check it: the list of what is wrong.
+// `users_given`: the users are of this request - what holds for those set now alone is asked of them
+function check(want, users_given) {
 	let s = want.settings, bad = [];
 	if (!match(s.password, KEY))
 		push(bad, 'settings.password: 16 letters and digits');
 	if (!int_in(s.first, 1, 65534) || !int_in(s.last, s.first + 1, 65535))
 		push(bad, 'settings.first, settings.last: ports, the first below the last');
+	// as the command of a Linux computer takes them: a time of 0 never ends for nft, and no try at all loads no rules
+	const low = { wait: 30, tries: 1, block: 1, short: 1, guesses: 1 }, high = { wait: 86400, tries: 1000, block: 86400, short: 3600, guesses: 1000 };
 	for (let k in [ 'wait', 'tries', 'block', 'short', 'guesses' ])
-		if (!int_in(s[k], 0, 86400))
-			push(bad, `settings.${k}: a whole number, 0 or more`);
+		if (!int_in(s[k], low[k], high[k]))
+			push(bad, `settings.${k}: a whole number of ${low[k]}-${high[k]}`);
+	if (!int_in(s.connections, 0, 1000))
+		push(bad, 'settings.connections: a whole number of 0-1000, 0 - any number');
+	// A knock may come a few seconds late, and the port must stay open till the next: wait 10 s more than the knock at least. A
+	// try of dialing of other seconds would leave a longer time between two SYNs than the rules wait: 3, 7, 15, 31 only
+	if (!int_in(s.knock, 5, 120))
+		push(bad, 'settings.knock: a whole number of 5-120 seconds');
+	else if (int_in(s.wait, 30, 86400) && s.wait < s.knock + 10)
+		push(bad, 'settings.wait: 10 seconds more than settings.knock at least');
+	if (!(s.dial in [ 3, 7, 15, 31 ]))
+		push(bad, 'settings.dial: 3, 7, 15 or 31 seconds');
+	if (!int_in(s.rebind, 1, 60))
+		push(bad, 'settings.rebind: a whole number of 1-60 minutes');
 	if (s.address != '' && !match(s.address, HOST))
 		push(bad, 'settings.address: a name in DNS, an IPv4 address, or empty - found');
 	let used = {}, ports = {};
@@ -222,8 +265,8 @@ function check(want) {
 		} else if (of != 'password')
 			push(bad, `${where}.of: password, a fixed port, or @record`);
 		key(a.key, `${where}.key`);
-		if (!match(a.expires ?? '', /^([0-9]{4}-[0-9]{2}-[0-9]{2})?$/))
-			push(bad, `${where}.expires: YYYY-MM-DD, its last day, or empty - never`);
+		if ((a.expires ?? '') != '' && !day_ok(a.expires))
+			push(bad, `${where}.expires: YYYY-MM-DD, its last day, a day there is, or empty - never`);
 		if (!int_in(a.limit ?? 0, 0, 1000000000))
 			push(bad, `${where}.limit: megabytes, 0 - none`);
 		if (!(a.direct in [ null, true, false ]))
@@ -233,6 +276,12 @@ function check(want) {
 		if (type(a.tags ?? []) != 'array' || length(a.tags ?? []) > 8 || length(filter(a.tags ?? [], (t) => !int_in(t, 0, 255))))
 			push(bad, `${where}.tags: 8 numbers of 0-255 at most`);
 	}
+	// a user of a port has a number of 1-255: one more would be left out by the rules, and open nothing
+	if (length(filter(want.users, (a) => substr(`${a.of ?? ''}`, 0, 1) != '@')) > 255)
+		push(bad, 'users: 255 users of ports at most - of the password and of fixed ports');
+	// a limit set while the firewall carries every connection on its own fast path would limit nothing
+	if (users_given && length(filter(want.users, (a) => (a.limit ?? 0) > 0 && a.direct != true && substr(`${a.of ?? ''}`, 0, 1) != '@')) && flow_offloading())
+		push(bad, 'users: a limit does not hold while Software flow offloading of the firewall is on - turn it off, Network > Firewall, then set the limit');
 	let ids = {};
 	for (let i, t in want.tags) {
 		if (!int_in(t.id, 0, 255) || ids[t.id])
@@ -249,6 +298,18 @@ function set() {
 	try { given = json(fs.stdin.read('all')); } catch (e) { fail('the input is not JSON'); }
 	if (type(given) != 'object')
 		fail('the input is not a JSON object');
+	// each part as it must be, before anything of it is looked into: a part that is no list would take every section of it away
+	if (given.settings != null && type(given.settings) != 'object')
+		fail('settings: an object');
+	for (let part in [ 'fixed', 'records', 'reports', 'users', 'tags' ]) {
+		if (given[part] == null)
+			continue;
+		if (type(given[part]) != 'array')
+			fail(`${part}: a list`);
+		for (let e in given[part])
+			if (type(e) != (part == 'reports' ? 'string' : 'object'))
+				fail(part == 'reports' ? 'reports: a list of lines' : `${part}: a list of objects`);
+	}
 	let now = get();
 	let want = {
 		settings: { ...now.settings, ...(given.settings ?? {}) },
@@ -260,17 +321,20 @@ function set() {
 	};
 	if (type(want.users) != 'array' || type(want.tags) != 'array')
 		fail('users, tags: each a list');
-	let bad = check(want);
+	let bad = check(want, given.users != null);
 	if (length(bad))
 		fail(join('; ', bad));
 
+	// the settings of before, whole: written back when the rules do not load with the new ones
+	const before = fs.readfile(`/etc/config/${CONF}`);
 	let c = cursor();
 	c.load(CONF);
 	let s = want.settings;
 	c.set(CONF, 'main', 'enabled', s.enabled ? '1' : '0');
-	for (let k in [ 'password', 'first', 'last', 'wait', 'tries', 'block', 'short', 'guesses' ])
+	for (let k in [ 'password', 'first', 'last', 'wait', 'tries', 'block', 'short', 'guesses', 'connections', 'knock', 'dial', 'rebind' ])
 		c.set(CONF, 'main', k, `${s[k]}`);
 	c.set(CONF, 'main', 'guard', s.guard ? '1' : '0');
+	c.set(CONF, 'main', 'log', s.log ? '1' : '0');
 	c.set(CONF, 'main', 'dns', s.address);
 	// the lists anew, each in the order given
 	for (let t in [ 'fixed', 'record', 'report', 'user', 'tag' ])
@@ -316,6 +380,16 @@ function set() {
 	c.commit(CONF);
 	// loaded as the page loads them: no stop first - it would take the rules away from the meetings going on
 	system('/etc/init.d/adhoc-relay restart >/dev/null 2>&1');
+	// The service says what the rules said when they did not load. Nothing of this request is kept then: the settings of
+	// before go back, and are loaded - the answer is what is true of the router, not what was asked of it
+	const failed = trim(fs.readfile('/tmp/adhoc-relay/failed') ?? '');
+	if (failed != '' && s.enabled) {
+		if (before != null) {
+			fs.writefile(`/etc/config/${CONF}`, before);
+			system('/etc/init.d/adhoc-relay restart >/dev/null 2>&1');
+		}
+		fail(`the rules did not load with these settings: ${failed} - nothing is kept, the settings of before are loaded`);
+	}
 	out(get());
 }
 

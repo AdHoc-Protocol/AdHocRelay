@@ -15,7 +15,7 @@ define Package/adhoc-relay
   SECTION:=net
   CATEGORY:=Network
   TITLE:=The meeting of two TCP connections in the NAT of the router
-  DEPENDS:=+firewall4 +kmod-nft-offload +ucode +ucode-mod-socket +ucode-mod-uci +ucode-mod-math +ucode-mod-fs
+  DEPENDS:=+firewall4 +kmod-nft-offload +kmod-nft-connlimit +ucode +ucode-mod-socket +ucode-mod-uci +ucode-mod-math +ucode-mod-fs +ucode-mod-digest
   PKGARCH:=all
 endef
 
@@ -40,6 +40,7 @@ define Package/adhoc-relay/install
 	$(INSTALL_BIN) ./files/adhoc-relay.init $(1)/etc/init.d/adhoc-relay
 	$(INSTALL_BIN) ./files/rules $(1)/usr/libexec/adhoc-relay/rules
 	$(INSTALL_BIN) ./files/uninstall $(1)/usr/libexec/adhoc-relay/uninstall
+	$(INSTALL_BIN) ./files/needs $(1)/usr/libexec/adhoc-relay/needs
 	$(INSTALL_DATA) ./files/give.uc $(1)/usr/libexec/adhoc-relay/give.uc
 	$(INSTALL_DATA) ./files/public.uc $(1)/usr/libexec/adhoc-relay/public.uc
 	$(INSTALL_BIN) ./files/state $(1)/usr/libexec/adhoc-relay/state
@@ -47,6 +48,8 @@ define Package/adhoc-relay/install
 	$(INSTALL_BIN) ./files/adhoc-relay $(1)/usr/sbin/adhoc-relay
 	$(INSTALL_DATA) ./files/version $(1)/usr/share/adhoc-relay/version
 	$(INSTALL_DATA) ./files/adhoc-relay.nft $(1)/usr/share/adhoc-relay/adhoc-relay.nft
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/ntp
+	$(INSTALL_DATA) ./files/adhoc-relay.ntp $(1)/etc/hotplug.d/ntp/30-adhoc-relay
 endef
 
 $(eval $(call BuildPackage,adhoc-relay))

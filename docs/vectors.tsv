@@ -1,0 +1,41 @@
+# The bytes of the protocol of AdHoc Relay for keys given: what a program that speaks it must make of the same keys. One case a
+# line: what it is, a tab, of what - spaces between -, a tab, the bytes, hex; and, where a relay answers them, a tab and its answer.
+#
+# kid <key>                                       the id of the key, 8 bytes
+# bind <key> <id> <address>                       a bind, 24 bytes: of the key, the id of the server - 8 bytes, hex - and the
+#                                                 address the relay sees it at
+# seen <key> <id> <address>                       what the relay answers a bind made for another address, 12 bytes: the
+#                                                 address it sees, and what the key says of it
+# bound <key> <id> <port> <address> <knock> <dial> <rebind>
+#                                                 what the relay answers a bind, 17 bytes: the port, the address, its times
+#                                                 - how often to knock, seconds; a try of dialing, seconds; how often to bind
+#                                                 anew, minutes - and what the key says of them - an answer the key did not
+#                                                 sign is not taken
+# knock <key> <id> <port> <address>               the key of the knocks of the port, 16 bytes: the knock that opens it
+# write <write key> <address>                     a write of a record, 16 bytes
+# read <read key> <8 bytes, hex>                  a read of a record, 16 bytes
+# answer <read key> <8 bytes> <address> <minutes> what the relay answers that read, 13 bytes: the address, the minutes since
+#                                                 it was written, and what the read key says of them
+#
+# The answers of the relay are those of one that sees the sender at 127.0.0.1 and has the fixed port 41000 with the key
+# Fx2pL8wNq7Rk3mZa, and a record with the write key Wk3vB9xQm5Tz2Lpe and the read key Rk8mP2qLx3Vb7NtY,
+# written the minute before, its times as by default - 20 s, 31 s, 30 minutes: a bind made for another address is answered with
+# the address, and made again for it.
+kid	Tr7kQ2xZp4Lm9sWd	474c59ae449ff595
+kid	Fx2pL8wNq7Rk3mZa	34ea1ffa17a92adf
+kid	Wk3vB9xQm5Tz2Lpe	c33aa24215134ba9
+kid	Rk8mP2qLx3Vb7NtY	f5befe7ef7b826fd
+bind	Fx2pL8wNq7Rk3mZa 0102030405060708 0.0.0.0	34ea1ffa17a92adf0102030405060708aa2e80595afb8e7c	7f0000018c3bf572334b37af
+seen	Fx2pL8wNq7Rk3mZa 0102030405060708 127.0.0.1	7f0000018c3bf572334b37af
+bind	Fx2pL8wNq7Rk3mZa 0102030405060708 127.0.0.1	34ea1ffa17a92adf01020304050607085ece3ba717910517	a0287f000001141f1ee69138f084725cf1
+bound	Fx2pL8wNq7Rk3mZa 0102030405060708 41000 127.0.0.1 20 31 30	a0287f000001141f1ee69138f084725cf1
+knock	Fx2pL8wNq7Rk3mZa 0102030405060708 41000 127.0.0.1	fde9b33116cd7e03e7b024852b63bb55
+bind	Tr7kQ2xZp4Lm9sWd a1b2c3d4e5f60718 203.0.113.7	474c59ae449ff595a1b2c3d4e5f60718470c7cf39eb4f855
+bound	Tr7kQ2xZp4Lm9sWd a1b2c3d4e5f60718 40001 203.0.113.7 30 15 60	9c41cb0071071e0f3cadfddabb86565c87
+knock	Tr7kQ2xZp4Lm9sWd a1b2c3d4e5f60718 40001 203.0.113.7	e9e3de0c89899e719bef38988fde4ff2
+knock	Tr7kQ2xZp4Lm9sWd a1b2c3d4e5f60718 49999 198.51.100.200	1a986e215edfeeb454e77bed1843fd04
+write	Wk3vB9xQm5Tz2Lpe 0.0.0.0	c33aa24215134ba96d8cbb33256c60ee	7f000001c6d017198f6d27b5
+write	Wk3vB9xQm5Tz2Lpe 127.0.0.1	c33aa24215134ba906b978851183cb6c	7f000001c6d017198f6d27b5
+read	Rk8mP2qLx3Vb7NtY 1122334455667788	f5befe7ef7b826fd1122334455667788	7f0000010088650c29521b9b28
+answer	Rk8mP2qLx3Vb7NtY 1122334455667788 127.0.0.1 0	7f0000010088650c29521b9b28
+answer	Rk8mP2qLx3Vb7NtY 00ff00ff00ff00ff 203.0.113.7 3	cb00710703792f49dcd120409b

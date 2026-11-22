@@ -4,6 +4,8 @@
 # service starts by its links in /etc/rc.d, the archive brings them; the packages it needs come when the router reaches the
 # internet ( needs wait ). OpenWrt runs this once, and erases it as it ends with 0
 [ -f /etc/config/adhoc-relay ] || cp /usr/share/adhoc-relay/adhoc-relay.config /etc/config/adhoc-relay
+# the password and the keys are in it: for root alone
+chmod 600 /etc/config/adhoc-relay
 if [ -z "$(uci -q get adhoc-relay.main.password)" ]; then
 	uci set adhoc-relay.main.password="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)"
 	uci commit adhoc-relay

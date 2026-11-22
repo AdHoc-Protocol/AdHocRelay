@@ -32,6 +32,7 @@ same files/uninstall /usr/libexec/adhoc-relay/uninstall
 same files/give.uc /usr/libexec/adhoc-relay/give.uc
 same files/needs /usr/libexec/adhoc-relay/needs
 same files/adhoc-relay.keep /lib/upgrade/keep.d/adhoc-relay
+same files/adhoc-relay.ntp /etc/hotplug.d/ntp/30-adhoc-relay
 same files/public.uc /usr/libexec/adhoc-relay/public.uc
 same files/adhoc-relay.nft /usr/share/adhoc-relay/adhoc-relay.nft
 same files/adhoc-relay.init /etc/init.d/adhoc-relay
@@ -59,7 +60,7 @@ nft get element ip adhoc_relay given { 41234 } >/dev/null 2>&1 || { echo "instal
 cp /src/adhoc-relay-openwrt.sh /tmp/
 sh /tmp/adhoc-relay-openwrt.sh remove
 for f in /usr/libexec/adhoc-relay /usr/share/adhoc-relay /etc/init.d/adhoc-relay /etc/config/adhoc-relay \
-	/www/luci-static/resources/view/adhoc-relay.js /usr/libexec/rpcd/adhoc-relay; do
+	/www/luci-static/resources/view/adhoc-relay.js /usr/libexec/rpcd/adhoc-relay /etc/hotplug.d/ntp/30-adhoc-relay; do
 	[ ! -e "$f" ] || { echo "remove left $f"; bad=1; }
 done
 ! nft list table ip adhoc_relay >/dev/null 2>&1 || { echo "remove left the table adhoc_relay"; bad=1; }

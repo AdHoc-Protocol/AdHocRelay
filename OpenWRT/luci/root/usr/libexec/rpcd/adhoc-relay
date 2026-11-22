@@ -2,12 +2,26 @@
 # AdHoc Relay for the page of LuCI: `ubus call adhoc-relay address | status` - what this router is now, by
 # /usr/libexec/adhoc-relay/state, the same that `adhoc-relay api get` takes; `ubus call adhoc-relay uninstall` - takes AdHoc Relay
 # off the router, this script too: it answers first, and the removal starts a second later, apart from rpcd.
+# `ubus call adhoc-relay unblock '{ "address": "203.0.113.9", "port": 0 }'` - lets an address blocked in again; with a port, at
+# that port, where it was blocked for guessing.
 
 case "$1" in
-list) echo '{ "address": {}, "status": {}, "uninstall": {} }' ;;
+# status: the page says what it shows now - the meetings, the tries of the last 10 minutes -, and the rest is not made
+list) echo '{ "address": {}, "status": { "meetings": true, "tries": true }, "uninstall": {}, "unblock": { "address": "", "port": 0 } }' ;;
 call)
 	case "$2" in
-	address|status) exec /usr/libexec/adhoc-relay/state "$2" ;;
+	address) exec /usr/libexec/adhoc-relay/state address ;;
+	# what is asked for comes on the standard input, and goes on to `state`
+	status) exec /usr/libexec/adhoc-relay/state status asked ;;
+	unblock)
+		. /usr/share/libubox/jshn.sh
+		json_load "$(cat)" 2>/dev/null
+		json_get_var address address
+		json_get_var port port
+		# a port: digits, not 0; anything else - none. `rules` takes digits and dots alone for the address
+		case "$port" in ''|0|*[!0-9]*) port= ;; esac
+		if /usr/libexec/adhoc-relay/rules unblock "$address" ${port:+"$port"} 2>/dev/null; then echo '{ "done": true }'; else echo '{ "done": false }'; fi
+		;;
 	uninstall)
 		if [ ! -x /usr/libexec/adhoc-relay/uninstall ]; then
 			echo '{ "started": false }'

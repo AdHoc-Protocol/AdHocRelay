@@ -5,7 +5,8 @@
 # ( ../pack.sh makes it ):
 #   sh adhoc-relay-openwrt.sh
 # The modules of ucode `give` needs come from the packages of OpenWrt when they are not there: ucode-mod-socket, 60 KiB, the
-# sockets; ucode-mod-math, which snapshots of OpenWrt do not have. nftables, fw4 and ucode are there already. A password of 16
+# sockets; ucode-mod-digest, 40 KiB, the hash of the keys; ucode-mod-math, which snapshots of OpenWrt do not have; kmod-nft-connlimit, 24 KiB, the count of the
+# connections of one address, not a must. nftables, fw4 and ucode are there already. A password of 16
 # characters is made when /etc/config/adhoc-relay has none, and printed. A router with LuCI gets the page Services > AdHoc Relay
 # too, with the button Uninstall. `sh install.sh remove` does the same: every file installed is erased, the settings too.
 # Installing again over an installed AdHoc Relay updates it and keeps its settings. The folder, or the file, copied into /tmp, is
@@ -17,12 +18,19 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 
 # src <file of the folder>: its text. The installer of one file has its own src, its files in it, and the path of itself in packed
 [ -n "$packed" ] || src() { cat "$here/$1"; }
-# put <file of the folder> <its place> [<mode>]: written there at once, no copy anywhere else - under $root, when it is a tree
+# put <file of the folder> <its place> [<mode>]: written there, no copy anywhere else - under $root, when it is a tree. Beside its
+# place first, then put in it: a script that runs meanwhile, or a flash that fills up, never leaves half a file there. One that
+# is there already as it is, is not written again: an update writes to the flash only what changed
 root=
 put() {
 	mkdir -p "$root$(dirname "$2")"
-	src "$1" > "$root$2"
-	[ -z "$3" ] || chmod "$3" "$root$2"
+	if [ -f "$root$2" ] && [ "$(src "$1" | md5sum)" = "$(md5sum < "$root$2")" ]; then
+		[ -z "$3" ] || chmod "$3" "$root$2"
+		return 0
+	fi
+	src "$1" > "$root$2.new"
+	[ -z "$3" ] || chmod "$3" "$root$2.new"
+	mv -f "$root$2.new" "$root$2"
 }
 
 # Every file in its place, under $root. With `luci`, the page of LuCI too. The list of what to keep through a flash of the firmware
@@ -42,6 +50,8 @@ lay() {
 	put files/adhoc-relay.config /usr/share/adhoc-relay/adhoc-relay.config
 	put files/adhoc-relay.init /etc/init.d/adhoc-relay 755
 	put files/adhoc-relay.keep /lib/upgrade/keep.d/adhoc-relay
+	# the clock set by NTP: the last days of the users are counted anew
+	put files/adhoc-relay.ntp /etc/hotplug.d/ntp/30-adhoc-relay
 	[ "$1" = luci ] || return 0
 	put luci/htdocs/luci-static/resources/view/adhoc-relay.js /www/luci-static/resources/view/adhoc-relay.js
 	put luci/root/usr/share/luci/menu.d/luci-app-adhoc-relay.json /usr/share/luci/menu.d/luci-app-adhoc-relay.json
@@ -76,6 +86,8 @@ fi
 
 if [ -d /www/luci-static/resources ]; then lay luci; else lay; fi
 [ -f /etc/config/adhoc-relay ] || put files/adhoc-relay.config /etc/config/adhoc-relay
+# the password and the keys are in it: for root alone
+chmod 600 /etc/config/adhoc-relay
 
 # none yet: one is made
 if [ -z "$(uci -q get adhoc-relay.main.password || true)" ]; then
@@ -94,8 +106,10 @@ fi
 
 /etc/init.d/adhoc-relay enable
 /etc/init.d/adhoc-relay restart
-first=$(uci -q get adhoc-relay.main.first)
-echo "AdHoc Relay: requests for a port at $first, ports of meeting $((first + 1))-$(uci -q get adhoc-relay.main.last)"
+# settings that name no ports: those the service takes then
+first=$(uci -q get adhoc-relay.main.first || true)
+last=$(uci -q get adhoc-relay.main.last || true)
+echo "AdHoc Relay: requests for a port at ${first:=40000}, ports of meeting $((first + 1))-${last:-49999}"
 
 # the installer in /tmp is not needed any more and takes the memory: the file of one goes; of the folder, its files go, and the
 # folder when nothing else is in it

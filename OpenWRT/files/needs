@@ -1,12 +1,12 @@
 #!/bin/sh
-# The packages of OpenWrt AdHoc Relay needs: the modules of ucode `give` and public.uc import - socket is not in OpenWrt, math is not
-# in its snapshots -, and the flowtables of the kernel for the fast path, which firewall4 brings - not a must.
+# The packages of OpenWrt AdHoc Relay needs: the modules of ucode `give` and public.uc import - socket and digest, the hash of the
+# keys, are not in OpenWrt, math is not in its snapshots -, and the flowtables of the kernel for the fast path, which firewall4 brings - not a must.
 #   needs           the modules missing, spaces between; nothing - none: `give` can run
 #   needs install   installs what is missing now: 0 - the modules are there
 #   needs wait      installs them once the router reaches the packages of OpenWrt - again a minute after, an hour at most - and starts
 #                   AdHoc Relay again. The service runs it when a module is missing: right after the archive of the page of LuCI is
 #                   restored, or a firmware is flashed, the router starts before its network
-MODULES='socket uci math fs'
+MODULES='socket uci math fs digest'
 
 missing() {
 	for m in $MODULES; do
@@ -16,15 +16,20 @@ missing() {
 
 fetch() {
 	need=$(missing)
-	[ -n "$(find /lib/modules -name 'nf_flow_table.ko' 2>/dev/null | head -n 1)" ] || need="$need kmod-nft-offload"
-	[ -n "$(echo $need)" ] || return 0
-	# a feed that failed to update leaves the others: the packages may be in them
+	more=
+	[ -n "$(find /lib/modules -name 'nf_flow_table.ko' 2>/dev/null | head -n 1)" ] || more=kmod-nft-offload
+	# the count of the connections of one address - the setting `connections` -: 24 KiB, not a must either
+	[ -n "$(find /lib/modules -name 'nft_connlimit.ko' 2>/dev/null | head -n 1)" ] || more="$more kmod-nft-connlimit"
+	[ -n "$(echo $need $more)" ] || return 0
+	# a feed that failed to update leaves the others: the packages may be in them. The flowtables apart: apk installs all it
+	# is asked for or nothing, and the modules must not wait for what is no must
 	if command -v apk >/dev/null; then
 		apk update >/dev/null 2>&1
-		apk add $need >/dev/null 2>&1
+		[ -z "$need" ] || apk add $need >/dev/null 2>&1
+		for m in $more; do apk add "$m" >/dev/null 2>&1; done
 	else
 		opkg update >/dev/null 2>&1
-		opkg install $need >/dev/null 2>&1
+		opkg install $need $more >/dev/null 2>&1
 	fi
 	[ -z "$(missing)" ]
 }

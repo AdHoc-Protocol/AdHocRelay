@@ -19,10 +19,10 @@ fi
 # every file, whichever way it came
 rm -rf /usr/libexec/adhoc-relay /usr/share/adhoc-relay /tmp/adhoc-relay /etc/adhoc-relay.used
 rm -f /etc/init.d/adhoc-relay /etc/rc.d/*adhoc-relay /etc/config/adhoc-relay \
-	/usr/share/nftables.d/chain-pre/forward/30-adhoc-relay.nft \
+	/usr/share/nftables.d/chain-pre/forward/30-adhoc-relay.nft /usr/share/nftables.d/chain-pre/input/30-adhoc-relay.nft \
 	/www/luci-static/resources/view/adhoc-relay.js /usr/share/luci/menu.d/luci-app-adhoc-relay.json \
 	/usr/share/rpcd/acl.d/luci-app-adhoc-relay.json /usr/libexec/rpcd/adhoc-relay /usr/sbin/adhoc-relay \
-	/lib/upgrade/keep.d/adhoc-relay /etc/uci-defaults/90-adhoc-relay
+	/lib/upgrade/keep.d/adhoc-relay /etc/uci-defaults/90-adhoc-relay /etc/hotplug.d/ntp/30-adhoc-relay
 
 # LuCI and rpcd forget the page; fw4 drops the include of the meetings
 rm -f /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null

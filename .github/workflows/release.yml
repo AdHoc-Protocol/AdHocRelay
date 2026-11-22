@@ -52,15 +52,34 @@ jobs:
             echo "::endgroup::"
           done
 
+      # the files checked above are the files released: not packed again there
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openwrt
+          path: |
+            adhoc-relay-openwrt.sh
+            adhoc-relay-openwrt.tar.gz
+          if-no-files-found: error
+
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
+      # the tag is the release the files say they are, OpenWRT/files/version: v1.2.3, or v1.2.3-rc1 before it
+      - name: the release of the tag
+        run: |
+          version=$(tr -d '\r\n' < OpenWRT/files/version)
+          [ "${GITHUB_REF_NAME%%-*}" = "v$version" ] || { echo "the tag $GITHUB_REF_NAME, and OpenWRT/files/version says $version"; exit 1; }
+
       # the lines of a server, as both scripts of the server take them: docs/lines.tsv
       - name: the lines
         run: sh .github/lines.sh
+
+      # the bytes of the protocol, as both scripts of the server make them: docs/vectors.tsv
+      - name: the bytes of the protocol
+        run: sh .github/vectors.sh
 
       - name: pack
         run: |
@@ -79,24 +98,36 @@ jobs:
           docker run --rm --cap-add NET_ADMIN -v "$PWD:/src:ro" debian:latest sh -c \
             'apt-get update >/dev/null && apt-get install -y --no-install-recommends nftables iptables procps >/dev/null && cd /src && sh .github/linux-install.sh adhoc-relay-linux.sh'
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: adhoc-relay-linux.sh
+          if-no-files-found: error
+
   release:
     needs: [openwrt, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
+      # the installers as the jobs above checked them
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          sh pack.sh openwrt adhoc-relay-openwrt.sh
-          sh pack.sh openwrt-web adhoc-relay-openwrt.tar.gz
-          sh pack.sh linux adhoc-relay-linux.sh
           cp Server/adhoc-relay-server.pl .
           (cd Server && zip -q ../adhoc-relay-server-windows.zip adhoc-relay-server.ps1 adhoc-relay-server.cmd)
           files="adhoc-relay-openwrt.sh adhoc-relay-openwrt.tar.gz adhoc-relay-linux.sh adhoc-relay-server.pl adhoc-relay-server-windows.zip"
+          for f in $files; do [ -s "$f" ] || { echo "no $f"; exit 1; }; done
+          # a tag as v1.2.3-rc1 is a release before the release: the links of `latest` stay with the last full one
+          early=
+          case "$GITHUB_REF_NAME" in *-*) early='--prerelease --latest=false' ;; esac
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" $files --clobber
           else
-            gh release create "$GITHUB_REF_NAME" $files --title "AdHoc Relay $GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" $files --title "AdHoc Relay $GITHUB_REF_NAME" --generate-notes $early
           fi

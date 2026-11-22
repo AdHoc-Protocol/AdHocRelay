@@ -6,7 +6,7 @@
 			"uci": [ "adhoc-relay" ]
 		},
 		"write": {
-			"ubus": { "adhoc-relay": [ "uninstall" ] },
+			"ubus": { "adhoc-relay": [ "uninstall", "unblock" ] },
 			"uci": [ "adhoc-relay" ]
 		}
 	}

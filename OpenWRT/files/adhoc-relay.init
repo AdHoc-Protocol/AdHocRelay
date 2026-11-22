@@ -20,7 +20,8 @@ record_one() {
 	config_get name "$1" name "$1"
 	config_get write "$1" write
 	config_get read "$1" read
-	records="$records $name:$write:$(echo $read | tr ' ' ',')"
+	# the list of its read keys, a comma between them: by the shell itself, no process for a record or a user
+	records="$records $name:$write:${read// /,}"
 }
 
 # the sections user, as `rules` takes them: "<of>:<key>:<expires>:<limit>:<name> ..." - - for none; the limit of one of the
@@ -35,15 +36,17 @@ user_one() {
 	config_get_bool direct "$1" direct 0
 	[ "$limit" = 0 ] && limit=
 	[ "$direct" = 1 ] && limit=direct
-	users="$users $of:$key:${expires:--}:${limit:--}:$(echo "$name" | tr ' :' '__')"
+	case "$name" in *[' :']*) name=${name// /_}; name=${name//:/_} ;; esac
+	users="$users $of:$key:${expires:--}:${limit:--}:$name"
 }
 
 start_service() {
 	config_load adhoc-relay
-	local enabled password first last wait tries block guard short guesses fixed= records= users=
+	local enabled password first last wait tries block guard short guesses log connections dial rebind out rc fixed= records= users=
 	config_get_bool enabled main enabled 1
 	if [ "$enabled" != 1 ]; then
 		/usr/libexec/adhoc-relay/rules unload
+		rm -f /tmp/adhoc-relay/failed
 		return 0
 	fi
 	config_get password main password
@@ -55,10 +58,51 @@ start_service() {
 	config_get_bool guard main guard 1
 	config_get short main short 20
 	config_get guesses main guesses 5
+	# what came in the last 10 minutes, noted for the page: only while it is turned on, for finding out why something does not work
+	config_get_bool log main log 0
+	# the meetings one address of a client may have at once; 0 - any number, nothing counts
+	config_get connections main connections 0
+	# the times of the servers: a try of dialing, seconds, and how often they bind again, minutes - `give` tells them, with how
+	# often to knock
+	config_get dial main dial 31
+	config_get rebind main rebind 30
 	config_foreach fixed_one fixed
 	config_foreach record_one record
 	config_foreach user_one user
-	/usr/libexec/adhoc-relay/rules load "$password" "$first" "$last" "$wait" "$tries" "$block" "$guard" "$short" "$guesses" "$fixed" "$records" "$users" 2>&1 | logger -t adhoc-relay
+	# The settings as they are loaded now, kept beside: `give` reads the copy of the last load that went well, not the file of
+	# the settings - a load that fails leaves the rules of before in the kernel, and `give` on with the settings of before
+	# too, not started again with a first port, a record, a report the rules do not have. In the memory, for root alone: the
+	# keys are in it
+	local applied=/tmp/adhoc-relay/applied
+	if ! (umask 077; mkdir -p "$applied" && uci -q export adhoc-relay > "$applied/adhoc-relay.new"); then
+		logger -t adhoc-relay -p daemon.err "the settings cannot be copied for give: the rules are left as they are"
+		mkdir -p /tmp/adhoc-relay
+		echo "the settings cannot be copied to $applied" > /tmp/adhoc-relay/failed
+		return 1
+	fi
+	# by the environment: the password and the keys are in no command line. What it says goes to the log. A load that failed is
+	# not lost in it: the rules there are - those of before, or none - are not of these settings, and the page says so, with
+	# the last line of what was said
+	out=$(PASSWORD="$password" FIRST="$first" LAST="$last" WAIT="$wait" TRIES="$tries" BLOCK="$block" GUARD="$guard" SHORT="$short" GUESSES="$guesses" \
+		FIXED="$fixed" RECORDS="$records" USERS="$users" LOG="$log" CONNECTIONS="$connections" DIAL="$dial" REBIND="$rebind" /usr/libexec/adhoc-relay/rules load 2>&1)
+	rc=$?
+	[ -z "$out" ] || echo "$out" | logger -t adhoc-relay
+	mkdir -p /tmp/adhoc-relay
+	if [ "$rc" = 0 ]; then
+		# loaded: the copy is of the rules there are now
+		if ! mv -f "$applied/adhoc-relay.new" "$applied/adhoc-relay"; then
+			logger -t adhoc-relay -p daemon.err "the copy of the settings for give cannot be put in its place"
+			echo "the copy of the settings cannot be put in its place: start AdHoc Relay again" > /tmp/adhoc-relay/failed
+			return 1
+		fi
+		rm -f /tmp/adhoc-relay/failed
+	else
+		rm -f "$applied/adhoc-relay.new"
+		logger -t adhoc-relay -p daemon.err "the rules did not load: the settings are not applied"
+		echo "${out:-the rules did not load}" | tail -n 1 > /tmp/adhoc-relay/failed
+	fi
+	# no load went well yet, since the router started: there are no rules, and nothing for `give` to answer by
+	[ -f "$applied/adhoc-relay" ] || return 1
 	# a module of ucode `give` needs is missing - right after the archive of the page is restored, or a firmware flashed -: it is
 	# installed once the router reaches the packages of OpenWrt, and this starts again then
 	if [ -n "$(/usr/libexec/adhoc-relay/needs)" ]; then
@@ -69,10 +113,12 @@ start_service() {
 		return 0
 	fi
 	procd_open_instance
-	procd_set_param command /usr/bin/ucode /usr/libexec/adhoc-relay/give.uc
-	# it reads the settings itself: a change of them starts it again, and so does its new code, put by an update
-	procd_set_param file /etc/config/adhoc-relay /usr/libexec/adhoc-relay/give.uc
-	procd_set_param respawn
+	procd_set_param command /usr/bin/ucode /usr/libexec/adhoc-relay/give.uc "$applied"
+	# it reads the settings of the last load that went well: a change of them starts it again - not a load that failed -, and
+	# so does its new code, put by an update
+	procd_set_param file "$applied/adhoc-relay" /usr/libexec/adhoc-relay/give.uc
+	# started again whenever it ends, with no end to the tries: 5 s between them
+	procd_set_param respawn 3600 5 0
 	procd_set_param stderr 1
 	procd_close_instance
 }
@@ -87,6 +133,9 @@ restart() {
 	start
 }
 
+# an interface that comes up - the wan of PPPoE or LTE comes after this starts, and again when the provider cuts it - loads the
+# rules again: the fast path is of the devices of the way out there are then
 service_triggers() {
 	procd_add_reload_trigger adhoc-relay
+	procd_add_raw_trigger "interface.*.up" 2000 /etc/init.d/adhoc-relay reload
 }

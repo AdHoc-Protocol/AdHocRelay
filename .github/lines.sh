@@ -17,5 +17,8 @@ while IFS="$tab" read -r line want; do
 	got=$(pwsh -NoProfile -File Server/adhoc-relay-server.ps1 -Parse "$line" | tr -d '\r')
 	[ "$got" = "$want" ] || { echo "FAIL  .ps1 '$line': '$got', not '$want'"; failed=$((failed + 1)); }
 done < docs/lines.tsv
+# Windows PowerShell 5.1 reads the script as UTF-8 only by its mark, the first three bytes: without it the signs of the lines in
+# the script are other characters, and it takes no line. pwsh here needs no mark, and would not miss it
+[ "$(head -c 3 Server/adhoc-relay-server.ps1 | od -An -tx1 | tr -d ' \n')" = efbbbf ] || { echo "FAIL  .ps1: no mark of UTF-8 at its start"; failed=$((failed + 1)); }
 echo "$cases lines, $failed failed"
 [ "$failed" -eq 0 ]

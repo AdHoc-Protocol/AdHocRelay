@@ -10,3 +10,4 @@
 /usr/share/rpcd/acl.d/luci-app-adhoc-relay.json
 /usr/libexec/rpcd/adhoc-relay
 /lib/upgrade/keep.d/adhoc-relay
+/etc/hotplug.d/ntp/30-adhoc-relay

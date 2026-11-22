@@ -237,17 +237,17 @@ function save(file, svg) {
 
     // 1: a port, asked and given
     let g = step(0, "--a");
-    write(g, (A + M) / 2, 172, "① The server asks for a port: UDP to 40000", 20);
+    write(g, (A + M) / 2, 172, "① The server gets a port: a bind to 40000", 20);
     arrow(rc, g, A, 184, M, 184, 200);
     arrow(rc, g, M, 222, A, 222, 202, { dash: true });
-    write(g, (A + M) / 2, 246, "the answer, 2 bytes: port 41933", 18);
+    write(g, (A + M) / 2, 246, "the answer, 17 bytes: port 41933, its address, the times, signed", 18);
     write(part(g, "--meet"), M + 16, 210, "port 41933, given to the id of the server", 18, "", "start");
 
     // 2: the knock
     g = step(1, "--a");
-    write(g, (A + M) / 2, 286, "② It opens it: UDP to 41933, password, id", 20);
+    write(g, (A + M) / 2, 286, "② It opens it: a knock to 41933, 16 bytes", 20);
     arrow(rc, g, A, 298, M, 298, 210);
-    write(part(g, "--meet"), M + 16, 304, "the port opens: the id is the server's", 18, "", "start");
+    write(part(g, "--meet"), M + 16, 304, "the port opens: the key of the knocks, its address", 18, "", "start");
 
     // 3: A dials, dropped, every second
     g = step(2, "--a");
@@ -367,23 +367,23 @@ function save(file, svg) {
 
     // 1: D writes its address
     let g = step(0, "--meet");
-    write(g, (S + D) / 2, 184, "① D writes: its write key, nothing else", 19);
+    write(g, (S + D) / 2, 184, "① D writes: the id of its write key, HMAC", 19);
     arrow(rc, g, D, 196, S, 196, 430);
     arrow(rc, g, S, 228, D, 228, 432, { dash: true });
-    write(g, (S + D) / 2, 252, "the answer: you are 198.51.100.20", 17, "small");
+    write(g, (S + D) / 2, 252, "the answer: the address S saw, 198.51.100.20", 17, "small");
     write(g, S - 14, 290, "record: 198.51.100.20, just now", 17, "", "end");
     write(g, D + 14, 290, "again each 60 s, and at once when its address changes", 16, "small", "start");
 
     // 2: the server reads it
     g = step(1, "--a");
-    write(g, (A + S) / 2, 330, "② The server reads: its read key", 19);
+    write(g, (A + S) / 2, 330, "② The server reads: the id of its read key", 19);
     arrow(rc, g, A, 342, S, 342, 440);
     arrow(rc, g, S, 374, A, 374, 442, { dash: true });
-    write(g, (A + S) / 2, 398, "198.51.100.20, 0 min old", 17, "small");
+    write(g, (A + S) / 2, 398, "198.51.100.20, 0 min old, signed by the read key", 17, "small");
 
     // 3: the meeting, as always, at that address
     g = step(2, "--a");
-    write(g, (A + D) / 2 + 60, 438, "③ It knocks at 198.51.100.20:41000 - the port of its line - and dials it", 19);
+    write(g, (A + D) / 2 + 60, 438, "③ It binds at 198.51.100.20:40000, gets the port 41000, knocks and dials it", 19);
     arrow(rc, g, A, 450, D, 450, 450);
     const bg = part(g, "--b");
     arrow(rc, bg, B, 486, D, 486, 452);
@@ -409,7 +409,7 @@ function save(file, svg) {
 
     // 6: the same port at the new address
     g = step(5, "--a");
-    write(g, (A + D) / 2 + 60, 754, "⑥ It knocks at 203.0.113.77:41000: the same port, D kept it", 19);
+    write(g, (A + D) / 2 + 60, 754, "⑥ It binds and knocks at 203.0.113.77: the same port 41000, D kept it", 19);
     arrow(rc, g, A, 766, D, 766, 480);
     const bg2 = part(g, "--b");
     arrow(rc, bg2, B, 800, D, 800, 482);
@@ -444,15 +444,15 @@ function save(file, svg) {
     };
 
     line(116, "A port given at each start, the relay at a fixed address", [
-        ["Tr7kQ2xZp4Lm9sWd", "--a", "the password: 16"], ["👉", "--muted", "goes to"], ["203.0.113.7", "--meet", "the relay"],
-        [":40000", "--meet", "its port of requests"], ["👉", "--muted", "an answer comes: a port"]]);
-    line(256, "A fixed port: always the same, its key opens it", [
-        ["Fx2pL8wNq7Rk3mZa", "--a", "the key of the port: 16"], ["👉", "--muted", "goes to"], ["203.0.113.7", "--meet", "the relay"],
-        [":41000", "--meet", "the fixed port: no 👉 after it, knock at once"]]);
+        ["Tr7kQ2xZp4Lm9sWd", "--a", "the password: 16"], ["👉", "--muted", "asks at"], ["203.0.113.7", "--meet", "the relay"],
+        [":40000", "--meet", "its port of requests"], ["👉", "--muted", "an answer comes: any free port"]]);
+    line(256, "A fixed port: the same form, with the key of the fixed port", [
+        ["Fx2pL8wNq7Rk3mZa", "--a", "the key of the port: 16"], ["👉", "--muted", "asks at"], ["203.0.113.7", "--meet", "the relay"],
+        [":40000", "--meet", "its port of requests"], ["👉", "--muted", "an answer comes: always 41000"]]);
     line(396, "The relay's address changes: read it where its record is kept", [
         ["Fx2pL8wNq7Rk3mZa", "--a", "password or key"], ["🌐", "--muted", "the address read at"], ["Rk8mP2qLx3Vb7NtY", "--b", "a read key"],
         ["👉198.51.100.9:40000", "--meet", "at S: it keeps the record"], ["🌐", "--muted", "else"], ["Hx4n…👉s2…", "--b", "another S"],
-        ["🌐41000", "--meet", "the port of the relay: it stays"]]);
+        ["🌐40000", "--meet", "the first port of the relay: it stays"], ["👉", "--muted", "an answer comes"]]);
     line(536, "For the relay whose address changes: where it writes it", [
         ["✏️Wk3vB9xQm5Tz2Lpe", "--meet", "the write key: 16"], ["👀Rk8mP2qLx3Vb7NtY", "--b", "a read key: for its lines"],
         ["👉198.51.100.9:40000", "--meet", "S, which keeps the record"]]);
@@ -468,9 +468,9 @@ function save(file, svg) {
     write(svg, 500, 44, "Two ways to a port of meeting", 26);
     const L = 250, R = 750;
     write(part(svg, "--a"), L, 92, "A port given at each start", 24);
-    write(svg, L, 116, "the line: password@relay:40000", 17, "small");
+    write(svg, L, 116, "the line: password👉relay:40000👉", 17, "small");
     write(part(svg, "--a"), R, 92, "A fixed port", 24);
-    write(svg, R, 116, "the line: key=relay:41000", 17, "small");
+    write(svg, R, 116, "the line: key👉relay:40000👉", 17, "small");
     outline(svg, rc.line(500, 80, 500, 560, { ...PEN, strokeWidth: 1.4, strokeLineDash: [6, 8], seed: 600 }), "o life");
 
     /** A box of a step at `y`, its words in it; its bottom returned. */
@@ -482,19 +482,22 @@ function save(file, svg) {
     };
     const down = (x, y1, y2, seed) => arrow(rc, svg, x, y1 + 4, x, y2 - 4, seed, { width: 1.8 });
 
-    let y = box("--a", L, 140, 380, ["① ask: password + id → 40000", "24 bytes"], 610);
+    let y = box("--a", L, 140, 380, ["① bind with the password → 40000", "24 bytes; the password itself is not sent"], 610);
     down(L, y, 232, 612);
-    y = box("--meet", L, 232, 380, ["② a free port: 41933", "2 bytes back, given to the id"], 614);
+    y = box("--meet", L, 232, 380, ["② any free port: 41933", "17 bytes back: the address of the server and the times, signed"], 614);
     down(L, y, 324, 616);
-    y = box("--a", L, 324, 380, ["③ knock: password + id → 41933", "24 bytes, every 20 s"], 618);
+    y = box("--a", L, 324, 380, ["③ knock: the key of the knocks → 41933", "16 bytes, every 20 s"], 618);
     down(L, y, 416, 620);
     box("--b", L, 416, 380, ["the client: 203.0.113.7:41933", "sent to it by the server"], 622);
     write(part(svg, "--bad"), L, 516, "↻ the next start: another port, another line", 19);
     write(svg, L, 542, "a minute after the server stops, the port is given to others", 16, "small");
 
-    y = box("--a", R, 140, 380, ["① knock: the key → 41000", "16 bytes, every 20 s; nothing asked"], 630);
-    write(part(svg, "--meet"), R, 290, "the port is set aside for the key", 17, "small");
-    down(R, y, 416, 632);
+    y = box("--a", R, 140, 380, ["① bind with the key of the port → 40000", "24 bytes; the key itself is not sent"], 630);
+    down(R, y, 232, 632);
+    y = box("--meet", R, 232, 380, ["② always the fixed port: 41000", "17 bytes back: the address of the server and the times, signed"], 636);
+    down(R, y, 324, 638);
+    y = box("--a", R, 324, 380, ["③ knock: the key of the knocks → 41000", "16 bytes, every 20 s"], 640);
+    down(R, y, 416, 642);
     box("--b", R, 416, 380, ["the client: 203.0.113.7:41000", "kept once, in its program"], 634);
     write(part(svg, "--b"), R, 516, "↻ the next start: the same port, the same line", 19);
     write(svg, R, 542, "nobody else gets it, ever; closed while the server does not knock", 16, "small");
@@ -521,7 +524,7 @@ function save(file, svg) {
 
     step("--a", 500, 76, 440, 56, ["Read: the next 🌐read key👉S of the line", "UDP, 16 bytes; up to 3 tries, 1 s each"], 700);
     go(500, 134, 500, 166, 702);
-    step("--meet", 500, 168, 280, 110, ["S answered?", "5 bytes"], 704, true);
+    step("--meet", 500, 168, 280, 110, ["S answered?", "13 bytes, signed"], 704, true);
     // no answer: another S, or none
     go(640, 223, 748, 223, 706);
     label(694, 214, "no");
@@ -545,11 +548,11 @@ function save(file, svg) {
     label(512, 456, "yes", "start");
     go(860, 400, 704, 486, 732);
 
-    step("--a", 500, 472, 400, 66, ["The address read, the port of the line", "👉 at the end: ask for a port, the same id; else knock"], 734);
+    step("--a", 500, 472, 400, 66, ["The address read, the first port of the line", "bind there: the port, and the key of its knocks"], 734);
     go(500, 540, 500, 574, 736);
     step("--a", 500, 576, 400, 56, ["Knock every 20 s, dial on and on", "from one local port, the knocks too"], 738);
     go(500, 634, 500, 668, 740);
-    step("--a", 500, 670, 400, 56, ["30 s later: read again, from the top", "moved: there with the same id or key; a new line"], 742);
+    step("--a", 500, 670, 400, 56, ["30 s later: read again, from the top", "moved: bind there, the same id; a new line"], 742);
     outline(svg, rc.path("M 300 698 C 40 698 40 104 136 104", { ...PEN, strokeWidth: 1.8, strokeLineDash: [8, 7], seed: 744 }));
     write(svg, 66, 600, "each 30 s", 16, "small", "start");
     save("reading", svg);
@@ -558,7 +561,7 @@ function save(file, svg) {
 // ── the packets, byte by byte, and what the relay tells by their length ──
 {
     const { svg, rc } = frame("AdHoc Relay: the packets, byte by byte", 1000, 720);
-    write(svg, 500, 44, "Every packet: UDP, its payload alone - told apart by its length and its first 16 bytes", 23);
+    write(svg, 500, 44, "Every packet: UDP, its payload alone - no key is ever sent, a packet names a key by its id", 23);
     const X = 290, B = 10;
     let seed = 800;
 
@@ -579,18 +582,22 @@ function save(file, svg) {
         write(part(svg, answer[1]), 960, y + 27, answer[0], 15, "", "end");
     };
     const none = ["no answer", "--muted"];
-    packet(78, "Ask for a port", "→ its port of requests", [[16, "password", "--a"], [8, "id", "--a"]], ["← 2: the port", "--meet"]);
-    packet(146, "Knock", "→ the port of meeting", [[16, "password", "--a"], [8, "id", "--a"]], none);
-    packet(214, "Hold", "→ the port of meeting", [[16, "password", "--a"], [8, "id", "--a"], [1, "", "--muted"]], none);
-    packet(282, "Knock: fixed port", "→ the fixed port", [[16, "its key", "--a"]], none);
-    packet(350, "Hold: fixed port", "→ the fixed port", [[16, "its key", "--a"], [1, "", "--muted"]], none);
-    packet(418, "Write: D → S", "→ the port of requests of S", [[16, "write key", "--meet"]], ["← 4: the address seen", "--meet"]);
-    packet(486, "Read: server → S", "→ the port of requests of S", [[16, "read key", "--b"]], ["← 5: address, minutes", "--meet"]);
+    packet(78, "Bind: ask for a port", "→ the port of requests", [[8, "id of key", "--a"], [8, "id", "--a"], [8, "HMAC", "--a"]],
+        ["← 17: port, address, times · or 12: address · signed", "--meet"]);
+    packet(146, "Knock", "→ the port of meeting", [[16, "key of the knocks", "--a"]], none);
+    packet(214, "Hold", "→ the port of meeting", [[16, "key of the knocks", "--a"], [1, "", "--muted"]], none);
+    packet(282, "Knock, and let clients call", "→ the port of meeting", [[16, "key of the knocks", "--a"], [8, "key of a call", "--a"]], none);
+    packet(350, "Call: the client", "→ the port of meeting", [[8, "key of a call", "--b"], [30, "where it can be reached", "--b"]],
+        ["← 30: that of the server", "--a"]);
+    packet(418, "Write: D → S", "→ the port of requests of S", [[8, "id of key", "--meet"], [8, "HMAC", "--meet"]], ["← 12: the address seen, signed", "--meet"]);
+    packet(486, "Read: server → S", "→ the port of requests of S", [[8, "id of key", "--b"], [8, "random", "--b"]],
+        ["← 13: address, minutes, HMAC", "--meet"]);
 
-    write(svg, 500, 586, "A wrong one - another length, a key not of the settings - gets no answer, and counts as a wrong password", 19);
-    write(svg, 500, 616, "Each answer is shorter than its request: the relay multiplies the traffic of nobody", 17, "small");
-    write(svg, 500, 644, "A port: 2 bytes, high first · an address: 4 bytes · the id: 8 random bytes of the server, the same in all its packets", 17, "small");
-    write(svg, 500, 672, "A knock goes from the local port the server dials from: the relay knows the server by it, a client behind its NAT is a client", 17, "small");
+    write(svg, 500, 578, "A wrong one - another length, an id of no key of the relay - gets no answer, and counts as a wrong password", 19);
+    write(svg, 500, 606, "Each answer is shorter than its request: the relay multiplies the traffic of nobody", 17, "small");
+    write(svg, 500, 630, 'id of key: 8 bytes of SHA-256 of "AdHoc Relay id" + the key · id: 8 random bytes of the server · a port: 2 bytes, high first', 17, "small");
+    write(svg, 500, 654, 'HMAC: 8 bytes of HMAC-SHA256 with the key, of "bind" + id + address · key of the knocks: 16, of "knock" + id + port + address', 17, "small");
+    write(svg, 500, 678, "A knock goes from the local port the server dials from: the relay knows the server by it, a client behind its NAT is a client", 17, "small");
     save("packets", svg);
 }
 
@@ -617,15 +624,15 @@ function step(rc, svg, pen, x1, x2, y, words, under, seed, dash = false) {
     if (under) write(g, (x1 + x2) / 2, y + 24, under, 16, "small");
 }
 
-// one relay, its address fixed: the line of the fixed port to the server, the server knocks, the line of the client, the client
-// dials, the relay joins them
+// one relay, its address fixed: the line of the fixed port to the server, the server binds and knocks, the line of the client,
+// the client dials, the relay joins them
 {
     const { svg, rc } = frame("AdHoc Relay: Remote Desktop through one relay", 1000, 560);
     const A = 130, R = 500, B = 870;
     heads(rc, svg, [[A, "server", "Server", "Windows, Remote Desktop on", 900], [R, "relay", "Relay", "203.0.113.7, fixed port 41000", 910],
         [B, "client", "Client", "Remote Desktop Connection", 920]], 520);
-    step(rc, svg, "--meet", R, A, 214, "① its line, from Server lines", "Fx2pL8wNq7Rk3mZa👉203.0.113.7:41000", 930, true);
-    step(rc, svg, "--a", A, R, 290, "② knocks with the key, dials 41000", "a knock every 20 s, as long as it runs", 932);
+    step(rc, svg, "--meet", R, A, 214, "① its line: Ports, Fixed ports, Copy", "Fx2pL8wNq7Rk3mZa👉203.0.113.7:40000👉", 930, true);
+    step(rc, svg, "--a", A, R, 290, "② binds with the key, knocks, dials 41000", "a knock every 20 s, as long as it runs", 932);
     step(rc, svg, "--a", A, B, 366, "③ the line for the client, in a message", "203.0.113.7:41000 - the same at every start", 934, true);
     step(rc, svg, "--b", B, R, 442, "④ Connect to 203.0.113.7:41000", "", 936);
     const met = part(svg, "--b");
@@ -644,9 +651,9 @@ function step(rc, svg, pen, x1, x2, y, words, under, seed, dash = false) {
         [D, "relay", "Relay D", "its address changes", 970], [B, "client", "Client", "Remote Desktop Connection", 980]], 680);
     step(rc, svg, "--meet", S, D, 214, "① its line for D", "✏️Wk3v…👀Rk8m…👉198.51.100.9:40000", 990, true);
     step(rc, svg, "--meet", D, S, 290, "② D writes its address", "every 60 s, at once when it changes", 992);
-    step(rc, svg, "--meet", D, A, 366, "③ the line of the server, from Server lines of D", "Fx2p…🌐Rk8m…👉198.51.100.9:40000🌐41000", 994, true);
+    step(rc, svg, "--meet", D, A, 366, "③ the line of the server: Ports, Copy on D", "Fx2p…🌐Rk8m…👉198.51.100.9:40000🌐40000👉", 994, true);
     step(rc, svg, "--a", A, S, 442, "④ reads the address of D", "again every 30 s", 996);
-    step(rc, svg, "--a", A, D, 518, "⑤ knocks with the key at D, dials 41000", "", 998);
+    step(rc, svg, "--a", A, D, 518, "⑤ binds with the key at D, knocks, dials 41000", "", 998);
     step(rc, svg, "--b", B, D, 594, "⑥ Connect to D:41000", "the line the server shows", 1000);
     const met = part(svg, "--b");
     outline(met, rc.line(A, 660, D, 660, { ...PEN, strokeWidth: 3.2, seed: 1002 }));

@@ -1,21 +1,29 @@
 [Unit]
 Description=AdHoc Relay: the meeting of two TCP connections in the NAT of this computer
-# after whatever loads the firewall: their rules first, then these
-After=network-online.target nftables.service iptables.service firewalld.service ufw.service docker.service
+# after whatever loads the firewall: their rules first, then these; after the clock is set, when the computer sets it at its start:
+# the last day of a user is counted from it
+After=network-online.target time-sync.target nftables.service iptables.service firewalld.service ufw.service docker.service
 Wants=network-online.target
+# nftables.service loaded again wipes every table, this one too: its restart starts this again, its reload loads the rules again
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
 
 [Service]
 # the rules, then `give`, which answers the requests for a port, keeps the records and writes the reports; a reload loads the
 # rules again and `give` reads the settings
-# again - the meetings going on go on. ${FIXED}, ${RECORDS} and ${ALIASES}: one argument each, the spaces in them too
+# again - the meetings going on go on. `rules` takes the settings from its environment, the file below: the password and the
+# keys are in no command line, where every user of the computer reads them
 Type=simple
 EnvironmentFile=/etc/adhoc-relay.conf
-ExecStartPre=/usr/libexec/adhoc-relay/rules load ${PASSWORD} ${FIRST} ${LAST} ${WAIT} ${TRIES} ${BLOCK} ${GUARD} ${SHORT} ${GUESSES} ${FIXED} ${RECORDS} ${ALIASES}
+ExecStartPre=/usr/libexec/adhoc-relay/rules load
 ExecStart=/usr/bin/perl /usr/libexec/adhoc-relay/give.pl
-ExecReload=/usr/libexec/adhoc-relay/rules load ${PASSWORD} ${FIRST} ${LAST} ${WAIT} ${TRIES} ${BLOCK} ${GUARD} ${SHORT} ${GUESSES} ${FIXED} ${RECORDS} ${ALIASES}
+ExecReload=/usr/libexec/adhoc-relay/rules load
 ExecReload=/bin/kill -HUP $MAINPID
-ExecStopPost=/usr/libexec/adhoc-relay/rules unload
-Restart=on-failure
+# the rules go when the service is stopped, not when `give` fell: it starts again then, and the rules loaded keep the ports given
+# and the meetings going on
+ExecStopPost=/bin/sh -c '[ "$$SERVICE_RESULT" = success ] || exit 0; exec /usr/libexec/adhoc-relay/rules unload'
+Restart=always
+RestartSec=1
 
 [Install]
 WantedBy=multi-user.target
