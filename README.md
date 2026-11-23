@@ -91,6 +91,13 @@ client on which nothing may be installed: the server then waits without a token,
 The relay never sends a client elsewhere by itself: the direct way is there only when both sides ask for it, by one token - see
 [Directly, when the two can](#directly-when-the-two-can).
 
+**No program in between.** AdHoc Relay Server and AdHoc Relay Client each pass the bytes between the connection they met and the
+program beside them - by splice on Linux, through one buffer elsewhere: little, but one step more on each side. A program that
+speaks the protocol of the relay itself has none: it waits at the relay, or meets its server, on its own socket. How:
+[In your own program](#in-your-own-program) - the packets, a few hundred lines -, or the network libraries of
+[AdHoc protocol](https://github.com/AdHoc-Protocol/AdHoc-protocol), which do it in C#, Java, TypeScript, Go, Rust, C, C++, Swift,
+Dart and Python: the waiting with a token and the meeting of the client, for TCP and WebSocket alike.
+
 ## What it does
 
 - **Two NATs, no forwarded port.** The server waits behind its NAT, the client dials it from behind its own; they meet at a port
@@ -1265,6 +1272,10 @@ lines of C# the script compiles at its start. The scripts of the server pass the
 same way.
 
 ## In your own program
+
+A program that speaks the protocol of the relay itself needs neither AdHoc Relay Server nor AdHoc Relay Client: no step between
+it and its connection. The network libraries of [AdHoc protocol](https://github.com/AdHoc-Protocol/AdHoc-protocol) do it in ten
+languages and may serve as a pattern; below is the protocol itself.
 
 Only the server needs code for AdHoc Relay; the client dials as usual. The server takes the one line its owner gives - see
 [The lines](#the-lines): the 16 characters of its key, 👉, the relay or where to read it, and its first port. The password, the
