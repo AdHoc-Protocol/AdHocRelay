@@ -5,7 +5,8 @@
 #   https://github.com/AdHoc-Protocol/AdHocRelay/releases/latest/download/adhoc-relay-openwrt.sh
 #   https://github.com/AdHoc-Protocol/AdHocRelay/releases/latest/download/adhoc-relay-linux.sh
 # are always the last ones. The server goes beside them: adhoc-relay-server.pl for Linux and macOS, and
-# adhoc-relay-server-windows.zip - the script of PowerShell and the .cmd that starts it by a double click.
+# adhoc-relay-server-windows.zip - the script of PowerShell and the .cmd that starts it by a double click; and AdHoc Relay Client
+# the same way: adhoc-relay-client.pl, adhoc-relay-client-windows.zip.
 name: release
 
 on:
@@ -121,7 +122,9 @@ jobs:
         run: |
           cp Server/adhoc-relay-server.pl .
           (cd Server && zip -q ../adhoc-relay-server-windows.zip adhoc-relay-server.ps1 adhoc-relay-server.cmd)
-          files="adhoc-relay-openwrt.sh adhoc-relay-openwrt.tar.gz adhoc-relay-linux.sh adhoc-relay-server.pl adhoc-relay-server-windows.zip"
+          cp Client/adhoc-relay-client.pl .
+          (cd Client && zip -q ../adhoc-relay-client-windows.zip adhoc-relay-client.ps1 adhoc-relay-client.cmd)
+          files="adhoc-relay-openwrt.sh adhoc-relay-openwrt.tar.gz adhoc-relay-linux.sh adhoc-relay-server.pl adhoc-relay-server-windows.zip adhoc-relay-client.pl adhoc-relay-client-windows.zip"
           for f in $files; do [ -s "$f" ] || { echo "no $f"; exit 1; }; done
           # a tag as v1.2.3-rc1 is a release before the release: the links of `latest` stay with the last full one
           early=

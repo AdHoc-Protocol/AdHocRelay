@@ -28,7 +28,8 @@ A Xiaomi Mi Router 4C - one core of MIPS at 580 MHz, 64 MB of memory, ports of 1
 through a port forwarded on it. [How much a router carries](#how-much-a-router-carries).
 
 - **The client installs nothing:** Remote Desktop Connection, ssh, a browser - it dials an address. The server: one line and a
-  small script, or a few lines in its own program.
+  small script, or a few lines in its own program. To meet the server directly when the two can, the client runs a small
+  [AdHoc Relay Client](#adhoc-relay-client), a small script of this project, beside its program.
 - **Only the one with the key waits at a port:** the key is never sent; a stranger never stands in for the server.
 - **The address of the relay may change:** another relay keeps it. No DNS, no service of anyone else.
 
@@ -66,6 +67,29 @@ small home router that forwards ports well serves as many meetings as it would s
 | What it is | The computer with the service: Remote Desktop of Windows, SSH, a web server, a program of its own | The computer with the program that connects: Remote Desktop Connection, ssh, a browser |
 | What it does | Asks the relay for a port, opens it, and waits there | Connects to that port, as to any address |
 | What it needs | The password of the relay; the script of AdHoc Relay, or a few lines of code | Only the line: the relay and the port. Nothing installed |
+
+## Which program you need
+
+| The service, the program that connects | On the server | On the client | The way |
+|:--|:--|:--|:--|
+| Remote Desktop, SSH, VNC, a web server - a client that only dials | [AdHoc Relay Server](#any-port-of-the-server) | nothing: the program dials the line | through the relay, always |
+| the same, and the two may be close - one LAN, IPv6, NATs that keep ports | AdHoc Relay Server with a token | [AdHoc Relay Client](#adhoc-relay-client) with the token, the program dials it | directly when the two can, else through the relay |
+| a program of your own on both sides | a few lines of its code | a few lines of its code | directly when the two can, else through the relay: [In your own program](#in-your-own-program) |
+
+**Without AdHoc Relay Client** nothing is installed on the client, and every byte goes through the relay: its kernel passes it,
+at the speed of the relay's line. Two computers in one LAN that meet at a relay in another city send each byte there and back.
+
+**With AdHoc Relay Client** the two meet directly whenever they can - in their LAN at the speed of the LAN, over IPv6, or at
+their public addresses -, and the relay only passes their call: it carries nothing, and its line is free for those who cannot
+meet otherwise. When they cannot, they meet through the relay, as without it. The program of the client is not changed: it dials
+a port of its own computer, where AdHoc Relay Client listens.
+
+**When to use it:** the client and the server are often in one LAN, or the traffic is large - files, video, Remote Desktop at a
+high resolution -, or the relay's line is slow. When it is not worth it: a browser of anyone - a page cannot run it -, or a
+client on which nothing may be installed: the server then waits without a token, and its clients dial the line.
+
+The relay never sends a client elsewhere by itself: the direct way is there only when both sides ask for it, by one token - see
+[Directly, when the two can](#directly-when-the-two-can).
 
 ## What it does
 
@@ -115,6 +139,7 @@ small home router that forwards ports well serves as many meetings as it would s
 | [Uninstall](#uninstall) | Everything erased, the settings too |
 | [Any port of the server](#any-port-of-the-server) | Remote Desktop, SSH, VNC, a web server, any port: one script on the server, the program of that service on the client |
 | [Directly, when the two can](#directly-when-the-two-can) | The traffic between the two, not through the relay; the relay when that fails |
+| [AdHoc Relay Client](#adhoc-relay-client) | Remote Desktop, ssh, a WebSocket client, a browser: directly when the two can, through the relay else - a small script beside the program |
 | [In your own program](#in-your-own-program) | The server |
 | [API](#api) | `adhoc-relay api get \| set`: the same JSON on a router and on a Linux computer, for a program that sets relays up over SSH |
 | [Safety](#safety), [Why nothing is encrypted](#why-nothing-is-encrypted), [When something goes wrong](#when-something-goes-wrong), [Limits](#limits) | |
@@ -993,6 +1018,8 @@ with a new password.
 
 ## Any port of the server
 
+**AdHoc Relay Server**, `adhoc-relay-server`: a script of this project for the computer of the service.
+
 When the client needs a service of the server - Remote Desktop of Windows, SSH, VNC, a web server, any TCP port - and nothing
 more, the server runs one script, and the client uses the program of that service, as with any address: Remote Desktop
 Connection, ssh, a VNC viewer, a browser. Nothing is installed on the client. The script asks for a port of meeting, shows the line, and joins each one who comes to the
@@ -1057,6 +1084,32 @@ perl adhoc-relay-server.pl --meet 'Fx2pL8wNq7Rk3mZa@Rk8mP2qLx3Vb7NtY>198.51.100.
 
 The last two are the same line: `>` and `@` typed for 👉 and 🌐. `-Forward`, `--forward`: a port of the server, or address:port of a computer of its network, such as `192.168.1.5:80`.
 
+**With a token** the script lets in only the [AdHoc Relay Client](#adhoc-relay-client), and meets it directly when the two can. The
+menu asks for it after the relay - `+` makes one, Enter keeps the one of last time, `-` none -; from a console, `-Token`,
+`--token`:
+
+```text
+powershell -ExecutionPolicy Bypass -File adhoc-relay-server.ps1 -Meet 'Tr7kQ2xZp4Lm9sWd👉router.example.org:40000👉' -Forward 3389 -Token K7QM2XHP9RTA4WZD
+perl adhoc-relay-server.pl --meet 'Tr7kQ2xZp4Lm9sWd👉router.example.org:40000👉' --forward 22 --token K7QM2XHP9RTA4WZD
+```
+
+Its knocks carry the key of a call of the token. A call the relay sends on is answered with where the server can be reached,
+and the client is dialed there too. Each connection, through the relay or directly, must begin with the 16 bytes of the token
+within 10 s, or it is cut off. The script shows the token beside the line, and how the client starts the utility with both:
+
+```text
+ 🎫 The token, with the line: K7QM2XHP9RTA4WZD - only AdHoc Relay Client gets in; a program that dials the line itself is cut off
+ 🧩 AdHoc Relay Client on the client: adhoc-relay-client.cmd -Meet router.example.org:41933 -Token K7QM2XHP9RTA4WZD -Listen 41933 · Linux, macOS: perl adhoc-relay-client.pl --meet router.example.org:41933 --token K7QM2XHP9RTA4WZD --listen 41933
+ 🖥️ Remote Desktop Connection ( mstsc ) of the client: as the computer, 127.0.0.1:41933
+
+ 👀 Waiting for whoever connects…
+ 📞 A client called: dialing it, 203.0.113.5:51000 at its public address
+ ✅ Someone came directly, 203.0.113.5:51000 at its public address: joined to 127.0.0.1:3389
+ 🚫 Someone came through the relay without the token: cut off
+```
+
+Without a token, as above: any program of the client, through the relay.
+
 After each connection the script waits again at the same port: the client connects again with the same line, after a break
 too, a second client as well. A new start of the script gets a new port, and so a new line - unless the port is fixed.
 
@@ -1076,7 +1129,9 @@ server is all that stops them:
 - for SSH of OpenSSH 9.8 and later: `PerSourcePenaltyExemptList 127.0.0.1,::1` in `sshd_config`. The script joins every
   connection from 127.0.0.1, so to `sshd` all the clients are one address, and its penalties for connections that log in to
   nothing would shut them all out; the relay guards them by the real address;
-- the line kept private, and the script stopped when nobody needs it.
+- the line kept private, and the script stopped when nobody needs it;
+- a token: then whoever dials the port of meeting without it is cut off before the service sees a byte - see
+  [AdHoc Relay Client](#adhoc-relay-client).
 
 The relay slows the guessers down and blocks them, see [Guard against guessing](#guard-against-guessing): that is the
 second line of defense, the password the first.
@@ -1087,6 +1142,19 @@ When both the server and the client are programs of their own, the traffic need 
 their call, in its kernel, as it passes a meeting: no program of the relay reads it. They tell each other where they can be
 reached, dial each other, and the relay carries nothing. Only when that fails - both behind NATs that change ports and no IPv6, a
 firewall in the way - they meet at the relay, as always. The work is theirs; the relay sends on one call and its answer.
+
+The relay never does it by itself: it does not see that the two sit behind one router, and it sends no client elsewhere. Both
+programs ask for it, or nothing happens:
+
+| The server knocks | The client | The way |
+|:--|:--|:--|
+| with the key of a call of a token | calls with the same token, as below | directly when the two can, else through the relay |
+| with the key of a call of a token | dials the port of meeting as any address | cut off by the server: every connection of it begins with the token |
+| without a key of a call | dials the port of meeting | through the relay, always - two computers in one LAN send every byte to the relay and back |
+| without a key of a call | calls with a token | the call goes nowhere; the client meets the server through the relay and writes the token - bytes the server does not expect |
+
+A client that is no program of yours - Remote Desktop, SSH, a browser - can only dial: the [AdHoc Relay Client](#adhoc-relay-client)
+calls and dials for it, on its own computer, and the scripts of the server take a token for it.
 
 1. **Each learns where it can be reached:** STUN at the port of requests of the relay, `stun:relay:40000`, from the local port it
    knocks or calls and will dial from - the address and the port the internet sees; useless when that port is not its local port,
@@ -1116,6 +1184,85 @@ let through once the first is gone. A kernel without timeouts of conntrack keeps
 conntrack in this kernel`. Calls of one address: 10 a second at most, apart from the requests and STUN.
 ✓ The browser has neither raw UDP nor dialing of TCP both ways: a page meets through the relay, and may go on over WebRTC, with the
 STUN of the relay.
+
+## AdHoc Relay Client
+
+**AdHoc Relay Client**, `adhoc-relay-client`: a script of this project for the computer of the client, the pair of
+[AdHoc Relay Server](#any-port-of-the-server).
+
+Remote Desktop Connection, ssh, a WebSocket client, a browser: a program of the client can only dial an address. AdHoc Relay
+Client does the rest for it. It listens at a port of the client's own computer; the program connects there, and for each
+connection the utility meets the server behind the port of meeting - directly when the two can, as in
+[Directly, when the two can](#directly-when-the-two-can), through the relay when they cannot -, writes the token first, and then
+passes the bytes as they are, both ways. The server runs the script of [Any port of the server](#any-port-of-the-server) with
+the same token.
+
+| The client | Download | Start |
+|:--|:--|:--|
+| Windows | [`adhoc-relay-client-windows.zip`](https://github.com/AdHoc-Protocol/AdHocRelay/releases/latest/download/adhoc-relay-client-windows.zip): unpack it into a folder | A double click on `adhoc-relay-client.cmd` |
+| Linux, macOS | [`adhoc-relay-client.pl`](https://github.com/AdHoc-Protocol/AdHocRelay/releases/latest/download/adhoc-relay-client.pl) | `perl adhoc-relay-client.pl` |
+
+Windows PowerShell of Windows or PowerShell 7 runs the one, the perl of the system the other: nothing to install. The menu asks
+for the line the server shows, its token, the local port - the port of meeting unless told another -, and, with a token, the
+first port of the relay; the answers are kept beside the script, `adhoc-relay-client.settings`, and next time Enter takes each.
+From a console, nothing asked:
+
+```text
+adhoc-relay-client.cmd -Meet router.example.org:41933 -Token K7QM2XHP9RTA4WZD -Listen 41933
+perl adhoc-relay-client.pl --meet router.example.org:41933 --token K7QM2XHP9RTA4WZD --listen 41933
+perl adhoc-relay-client.pl --meet router.example.org:41933 --token K7QM2XHP9RTA4WZD --listen 0.0.0.0:41933 --first 40000 --wait 2.5
+```
+
+| Argument | What it is |
+|:--|:--|
+| `--meet`, `-Meet` | The line the server shows for its client: the relay and the port of meeting |
+| `--token`, `-Token` | The token of the server, 16 letters and digits. Without it: through the relay, nothing written |
+| `--listen`, `-Listen` | Where the program of this computer connects: a port of 127.0.0.1, or address:port - `0.0.0.0:41933` lets the computers of its LAN in too |
+| `--first`, `-First` | The first port of the relay, where it answers STUN: 40000 unless given |
+| `--wait`, `-Wait` | How long the two dial each other before the relay is taken: 2.5 s unless given |
+
+The program then connects to `127.0.0.1:41933`: Remote Desktop Connection as the computer, `ssh -p 41933 user@127.0.0.1`,
+`ws://127.0.0.1:41933/`. The utility says for each connection how it met the server:
+
+```text
+ ✅ 127.0.0.1:52344 met the server directly, 203.0.113.7:51000 at its public address
+ ✅ 127.0.0.1:52350 met the server directly, 192.168.1.20:51000 in the LAN
+ ✅ 127.0.0.1:52361 met the server directly, [2001:db8::20]:51000 over IPv6
+ ✅ 127.0.0.1:52377 met the server through the relay - nothing to call with: the NAT of this computer changes the port, and no IPv6
+```
+
+| The server waits | The program dials the line itself | AdHoc Relay Client, with the token |
+|:--|:--|:--|
+| with a token | cut off: no token comes first | directly when the two can, else through the relay; the token first either way |
+| without a token | through the relay | the call gets no answer: through the relay after 6 s, and the token written - bytes the service does not expect. Run the utility without a token then |
+
+The utility without a token goes through the relay and writes nothing, as the program would dial the line itself: the program
+gets a fixed local address, nothing more.
+
+**The token** is 16 letters and digits, as a key of the relay, the same on both command lines; the script of the server makes
+one, `+` in its menu. On each connection it goes as its 16 bytes, first; to the relay only the key of a call of it - the first 8
+bytes of SHA-256 of `adhoc-relay call` and the token. The line of the client stays `relay:port`: the token goes beside it, as a
+program of its own has its token in its own line beside the address. It is no key of the relay: it opens no port, and the relay
+never sees it. It tells the server which connections are of its client, and goes in the clear: it keeps out whoever does not
+know it - the programs that try every port of the internet -, not whoever watches the traffic. The service checks who comes,
+as always.
+
+**WebSocket, and names.** The program dials `127.0.0.1:41933`, and says so: a WebSocket client sends `Host: 127.0.0.1:41933`,
+a browser too. Most WebSocket servers do not look at it; one that does - a virtual host, a check of the origin - is told to take
+that name too. `wss://`, WebSocket over TLS, checks the certificate by the name dialed, and 127.0.0.1 is not in it: the client is
+given the real name of the server to check by - most TLS libraries take it apart from the address -, or the program uses `ws://`
+and encrypts inside its own protocol. A browser opening `https://127.0.0.1:41933` warns for the same reason.
+
+**Several at once.** A browser opens several connections at once, Remote Desktop two or three: each calls the server on its own.
+The relay passes one call to a server at a time - a call lives 2 s in its conntrack, and the next waits till it is gone -: the
+second meets about 2 s after the first, the third 4 s, and one that has called 6 s goes through the relay.
+
+**The bytes** pass both ways at once, each way on its own: one that waits for its other end to take the bytes holds nothing of the
+other. A way that ends ends the sending of its other end only - a program that sends, ends its sending and waits for the answer
+gets it. On Linux by splice: from the one socket into a pipe and on into the other, in the kernel, never copied into the script;
+on macOS, or where splice cannot, through one buffer of 256 KB a way; on Windows through one buffer of 256 KB a way too, in a few
+lines of C# the script compiles at its start. The scripts of the server pass the bytes between the meeting and the service the
+same way.
 
 ## In your own program
 
@@ -1341,6 +1488,9 @@ An OpenWrt router and a Linux computer give the same JSON; every part of it can 
   their computers do so - can send again what he caught: a write puts a record back to the address it was written for, until
   the relay of that record writes again, a minute at most; a bind and a knock renew what the server has itself. He disturbs,
   and learns no key and takes no port by it.
+- The token of the scripts goes in the clear, the first 16 bytes of each connection: it keeps out whoever does not know it - the
+  programs that try every port -, not whoever watches the traffic, who sees it as he sees the meeting. It opens no port: the
+  relay never sees it, only the key of a call made of it.
 - A call needs the key of a call of its port: without it nothing reaches the server, the call goes nowhere. The relay
   passes the call and the answer as they are, a few a second from an address: what the two tell each other - where they can be
   reached - is theirs, and the server answers only a call with its key. The key is derived from the token, the token never
@@ -1406,9 +1556,13 @@ who, and the secrecy of what the two say, stays with them.
 | A fixed port, a record: not there; the log says `left out` | Its key is not 16 letters and digits, is used twice, or the port is out of the range | Fix it as the log says, then reload |
 | No **AdHoc Relay** under **Services** after installing | The browser shows the menu it loaded before | Reload the page, or log out of LuCI and in again |
 | The column Data is always `-` | The router does not count bytes of connections: OpenWrt has it off by default | Turn it on for the whole router: `sysctl -w net.netfilter.nf_conntrack_acct=1` |
+| Two programs of yours in one LAN meet through the relay, and the traffic is slow | One of them does not use the direct way: the server knocks without the key of a call, or the client dials the port of meeting as any address instead of calling | Both use it: the server knocks with the key of a call of the token, the client calls with the same token. See [Directly](#directly-when-the-two-can) |
 | Two programs of yours always meet through the relay, never directly | Nothing to dial: a NAT of each changes the local port - a mobile network, a NAT of a provider - and one of them has no IPv6; or the answer comes, and the SYNs do not pass a firewall of the two | Nothing to do: the relay carries them. IPv6 on both makes it direct. **The last 10 minutes** shows **A client called the server** when the call came |
 | A client calls, and gets no answer | The key of a call is not of that port - another token -, or the server knocks without one | The server knocks with the key of a call of the same token |
 | A call is refused | The server does not dial the relay this moment: it has just met a client, or is gone | The client calls again from another local port, for a few seconds; then it dials the relay, as any client |
+| AdHoc Relay Client says `the call got no answer`, and goes through the relay | Another token on the two, or the server waits without one | The same token on both: the script of the server shows it beside the line |
+| The script of the server says `Someone came through the relay without the token: cut off` | A program dials the line itself, or someone tries the port: with a token only AdHoc Relay Client gets in | The client runs the utility, and its program dials it; or the server waits without a token |
+| A WebSocket client, through the utility: the server refuses it, or TLS fails | The client sends `Host: 127.0.0.1:<port>`, and `wss://` checks the certificate by 127.0.0.1 | The server takes that name too; for TLS the client is given the real name of the server, or `ws://` with encryption inside. See [AdHoc Relay Client](#adhoc-relay-client) |
 
 ## Limits
 
@@ -1460,8 +1614,11 @@ who, and the secrecy of what the two say, stays with them.
   relay behind a NAT.
 - Directly: over IPv6 when both have it, in their LAN when both are behind one NAT, at their public addresses when both NATs keep
   the local port; the relay carries the rest. The relay itself speaks IPv4 only: the IPv6 addresses are only passed in the call.
-- A meeting directly is of two programs of their own: a client that only dials - Remote Desktop Connection, ssh, a browser - meets
-  through the relay always.
+- A meeting directly is of two programs that do the direct way: programs of their own, or a script of the server with a token
+  and the [AdHoc Relay Client](#adhoc-relay-client). A client that only dials - Remote Desktop Connection, ssh, a browser - meets
+  through the relay, unless the utility dials for it.
+- AdHoc Relay Client calls once a connection: connections opened at once meet one after another, about 2 s apart, and those
+  that wait 6 s go through the relay.
 
 ## Folders
 
@@ -1472,4 +1629,5 @@ who, and the secrecy of what the two say, stays with them.
 | [`.github/`](.github) | A tag `v…` pushed: GitHub makes both installers of one file and puts them into the release, with the scripts of `Server/` |
 | [`Linux/`](Linux) | For a Linux computer: the installer, `give.pl`, the command `adhoc-relay`, the service of systemd, the settings |
 | [`Server/`](Server) | The server: `adhoc-relay-server.ps1` and the `.cmd` that starts it for Windows, `adhoc-relay-server.pl` for Linux and macOS. See [Any port of the server](#any-port-of-the-server) |
+| [`Client/`](Client) | AdHoc Relay Client: `adhoc-relay-client.ps1` and the `.cmd` that starts it for Windows, `adhoc-relay-client.pl` for Linux and macOS. See [AdHoc Relay Client](#adhoc-relay-client) |
 | [`docs/`](docs) | The pictures of this page. They are drawn by hand by a script, in [`docs/draw/`](docs/draw): `npm install`, then `node draw.mjs` there draws them again |

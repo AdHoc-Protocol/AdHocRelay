@@ -4,6 +4,7 @@
 #
 #   adhoc-relay-server.cmd                                                     a double click: asks, as a menu; the answers kept
 #   powershell -ExecutionPolicy Bypass -File adhoc-relay-server.ps1 -Meet 'Tr7kQ2xZp4Lm9sWd👉router.example.org:40000👉' -Forward 3389
+#   powershell -ExecutionPolicy Bypass -File adhoc-relay-server.ps1 -Meet 'Tr7kQ2xZp4Lm9sWd👉router.example.org:40000👉' -Forward 3389 -Token K7QM2XHP9RTA4WZD
 #
 # The line is a key, 👉, the relay and its first port, 👉 - of the password, of a fixed port, of a user: all alike. No key travels:
 # the script binds a port of meeting at the relay - the id of its key, its own id, 8 random bytes of this start, and 8 bytes of
@@ -17,8 +18,14 @@
 # Fx2pL8wNq7Rk3mZa🌐Rk8mP2qLx3Vb7NtY👉203.0.113.7:40000🌐Hx4nT7wAc5Jd2QeL👉198.51.100.9:40000🌐40000👉 -, and the address is read
 # there, again every 30 s; an answer the key of reading did not sign is not taken. The signs may be typed as > and @. Windows
 # PowerShell 5.1, as Windows has it, or PowerShell 7: nothing to install.
+#
+# With a token, 16 letters and digits, the client is AdHoc Relay Client, and the two meet directly when they can:
+# the knocks carry the key of a call of the token, 8 bytes of SHA-256 of "adhoc-relay call" and the token; a call the relay sends
+# on is answered with where this server can be reached - by STUN at the first port of the relay, in its LAN, over IPv6 -, and
+# the client is dialed there from the local port of the knocks, a new SYN each 300 ms, 3 s. Each connection, through the relay
+# or directly, begins with the token: one without it is cut off, the program of the client that dials the line itself too.
 
-param([string]$Meet, [string]$Forward, [string]$Parse, [string]$Vector)
+param([string]$Meet, [string]$Forward, [string]$Token, [string]$Parse, [string]$Vector)
 
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
@@ -56,7 +63,7 @@ function Load-Kept {
 
 function Save-Kept($k) {
     $text = "# AdHoc Relay, the server: what the menu offers on Enter`r`n"
-    foreach ($n in 'service', 'forward', 'meet', 'password') { if ($k[$n]) { $text += "$n = $($k[$n])`r`n" } }
+    foreach ($n in 'service', 'forward', 'meet', 'password', 'token') { if ($k[$n]) { $text += "$n = $($k[$n])`r`n" } }
     try { [IO.File]::WriteAllText($KeptFile, $text) } catch { Say '💾' quiet "Not kept for the next start: $($_.Exception.Message)" }
 }
 
@@ -152,8 +159,20 @@ function Point([string]$t) {
     return $p
 }
 
-# A password or a key: 16 letters and digits.
+# A password or a key: 16 letters and digits. A token is the same.
 function Key-Ok([string]$k) { return $k -cmatch '^[A-Za-z0-9]{16}$' }
+
+# A new token: 16 letters and digits of the random bytes of the system, those mistaken for one another left out - as the relay
+# makes its keys. Each character alike: a byte past the last whole run of the letters is left out, not folded onto the first
+function New-Token {
+    $abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+    $whole = 256 - 256 % $abc.Length
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    $b = New-Object byte[] 1
+    $t = ''
+    try { while ($t.Length -lt 16) { $rng.GetBytes($b); if ($b[0] -lt $whole) { $t += $abc[$b[0] % $abc.Length] } } } finally { $rng.Dispose() }
+    return $t
+}
 
 # The line without its key, as the menu keeps it, the signs of the keyboard: > first, or @ before each read and the port; > last.
 function Rest-Of($p) {
@@ -275,13 +294,26 @@ function Menu {
         $key = Read-Line 'Its password or key, 16 letters and digits:'
         if (-not (Key-Ok $key)) { Say '💡' warn 'The password of a relay, or a key of it, is 16 letters and digits' }
     }
+    # the token: Enter keeps what was last time, a token or none
+    Say '🎫' quiet 'With a token only AdHoc Relay Client gets in, given the token too, and directly when the two can. Without one, any program of the client, through the relay'
+    while ($true) {
+        if (Key-Ok $k.token) { $typed = Read-Line 'The token - Enter for the one of last time, - for none, + for a new one:' }
+        else { $typed = Read-Line 'The token, 16 letters and digits - + for a new one, Enter for none:' }
+        if (-not $typed) { $tk = $(if (Key-Ok $k.token) { $k.token } else { $null }) }
+        elseif ($typed -eq '-') { $tk = $null }
+        elseif ($typed -eq '+') { $tk = New-Token }
+        else { $tk = $typed }
+        if (-not $tk -or (Key-Ok $tk)) { break }
+        Say '💡' warn 'A token is 16 letters and digits, as a key; + makes one'
+    }
     $k.service = "$service"
     if ($service -eq 5) { $k.forward = $to }
     $k.meet = Pretty $meet # kept as people see it: the emoji
     $k.password = $key
+    $k.token = $tk
     Save-Kept $k
     Write-Host
-    return @($to, "$key$meet")
+    return @($to, "$key$meet", $tk)
 }
 
 # ── the arguments, or the menu ──
@@ -303,12 +335,22 @@ if ($Forward -or $Meet) {
     if (-not ($Forward -and $Meet)) { Fail '-Meet and -Forward go together' }
     $to = Target $Forward
     if (-not $to) { Fail '-Forward <port> or <address:port>, such as 3389 or 192.168.1.5:80' }
+    if ($Token -and -not (Key-Ok $Token)) { Fail '-Token <16 letters and digits>, such as K7QM2XHP9RTA4WZD' }
     $given = $Meet
 } else {
-    $to, $given = Menu
+    if ($Token) { Fail '-Token goes with -Meet and -Forward' }
+    $to, $given, $Token = Menu
 }
 $p = Point $given
 if (-not $p -or -not (Key-Ok $p.key)) { Fail "-Meet <the line of the relay>, $Lines" }
+# with a token, the key of a call of it: what the knocks carry after the key of the knocks, and a call begins with - the first 8
+# bytes of SHA-256 of "adhoc-relay call" and the token. The token itself goes only to the client, the first bytes of each
+# connection
+$Call = $null
+if ($Token) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $Call = [byte[]]($sha.ComputeHash($Ascii.GetBytes("adhoc-relay call$Token"))[0..7]) } finally { $sha.Dispose() }
+}
 $isRdp = $to -match ":$RDP$"
 $toHost, $toPort = $to -split ':(?=\d+$)'
 
@@ -435,6 +477,7 @@ function Ask($at, [int]$tries = 10) {
         $script:TryFor = $(if ($got[7]) { [int]$got[7] } else { 31 })
         $script:Rebind = $(if ($got[8]) { [int]$got[8] } else { 30 })
         $script:knock = Knock-Key $p.key $id ([byte[]]$got[0..1]) $script:as
+        if ($Call) { $script:knock = [byte[]]($script:knock + $Call) }
         return $got[0] * 256 + $got[1]
     }
     return 0
@@ -462,53 +505,120 @@ function Show {
     Write-Host '    │  ' -NoNewline -ForegroundColor DarkGray; Write-Host $line -NoNewline -ForegroundColor Green; Write-Host '  │' -ForegroundColor DarkGray
     Write-Host "    ╰$bar╯" -ForegroundColor DarkGray
     try { Set-Clipboard -Value $line; Say '📋' good 'It is in your clipboard already: just paste it into a message' } catch { }
-    if ($isRdp) { Say '🖥️' news "Remote Desktop Connection ( mstsc ) of the client: as the computer, $line" }
-    elseif ($toPort -eq '22') { Say '🔐' news "On the client: ssh -p $port <user>@$($at.name)" }
-    elseif ($toPort -eq '80') { Say '🌐' news "A browser of the client: http://$line" }
-    else { Say '🔗' news "A program of the client reaches $to at $line" }
+    # with a token the program of the client dials AdHoc Relay Client, on its own computer: it listens at the port of meeting
+    # there, unless told another
+    $reach = $line; $reachHost = $at.name
+    if ($Token) {
+        # the first port of the relay, when it is not 40000: AdHoc Relay Client asks STUN there - as perl and as PowerShell take it
+        $firstPl = ''; $firstPs = ''
+        if ($at.port -ne 40000) { $firstPl = " --first $($at.port)"; $firstPs = " -First $($at.port)" }
+        Say '🎫' news "The token, with the line: $Token - only AdHoc Relay Client gets in; a program that dials the line itself is cut off"
+        Say '🧩' news "AdHoc Relay Client on the client: adhoc-relay-client.cmd -Meet $line -Token $Token -Listen $port$firstPs · Linux, macOS: perl adhoc-relay-client.pl --meet $line --token $Token --listen $port$firstPl"
+        $reach = "127.0.0.1:$port"; $reachHost = '127.0.0.1'
+    }
+    if ($isRdp) { Say '🖥️' news "Remote Desktop Connection ( mstsc ) of the client: as the computer, $reach" }
+    elseif ($toPort -eq '22') { Say '🔐' news "On the client: ssh -p $port <user>@$reachHost" }
+    elseif ($toPort -eq '80') { Say '🌐' news "A browser of the client: http://$reach" }
+    else { Say '🔗' news "A program of the client reaches $to at $reach" }
     Write-Host
 }
 Show
 Say '👀' wait 'Waiting for whoever connects…'
 
-# the connections joined now: each way a copy of .NET, on its own; a way that ended tells the other side, a pair that ended goes
+# ── passing the bytes ──
+
+# Both ways of a pair of connections at once, each on a thread of its own: Socket.Receive fills one buffer of 256 KB, allocated
+# once, and Socket.Send sends that very slice of it, from an offset till all of it is gone - no stream over the sockets, no copy
+# into another buffer, nothing allocated per read. .NET has nothing that passes one socket to another inside the system - its
+# TransmitFile sends a file -, so one pass through this buffer is the least there is. A blocking way each: one that waits for its
+# other end to take the bytes holds nothing of the other. A way that ends ends the sending of its other end only: a program that
+# sends, ends its sending and waits for the answer gets it; a way that fails ends both connections, and so the other way too.
+# The buffers of the sockets are left to the system: Windows and Linux grow them as the connection needs - to megabytes on a
+# far one -, and a size set by a program turns that off. In C#, compiled once at the start: PowerShell itself would take its
+# own time for each piece
+$PassSource = @'
+using System;
+using System.Net.Sockets;
+using System.Threading.Tasks;
+public static class AdHocRelayPass {
+    static void One(Socket from, Socket to) {
+        byte[] buf = new byte[262144];
+        bool ended = false;
+        try {
+            while (true) {
+                int n = from.Receive(buf, 0, buf.Length, SocketFlags.None);
+                if (n <= 0) { ended = true; break; }
+                for (int off = 0; off < n; ) off += to.Send(buf, off, n - off, SocketFlags.None);
+            }
+        } catch (Exception) { }
+        if (ended) { try { to.Shutdown(SocketShutdown.Send); } catch (Exception) { } return; }
+        try { from.Shutdown(SocketShutdown.Both); } catch (Exception) { }
+        try { to.Shutdown(SocketShutdown.Both); } catch (Exception) { }
+    }
+    public static Task Both(Socket a, Socket b) {
+        Task up = Task.Factory.StartNew(() => One(a, b), TaskCreationOptions.LongRunning);
+        Task down = Task.Factory.StartNew(() => One(b, a), TaskCreationOptions.LongRunning);
+        return Task.WhenAll(up, down);
+    }
+}
+'@
+if (-not ('AdHocRelayPass' -as [type])) { Add-Type -TypeDefinition $PassSource }
+
+# the connections joined now, each pair passed both ways by AdHocRelayPass; a pair that ended goes
 $pairs = New-Object Collections.ArrayList
-# a way that ended sets it, from the thread of its copy: the loop that waits wakes at once, and the end of a stream reaches the
-# other side with no wait - a program that sends, closes its sending and waits for the answer is not held a second
+# a pair that ended sets it, from the thread of its way, and so does a connection that brought its token: the loop that waits
+# wakes at once
 $wake = New-Object Threading.ManualResetEventSlim
 $wakeSet = [Delegate]::CreateDelegate([Action], $wake, 'Set')
 # as many joined at once, no more: the port of meeting is open to anyone, and each one who comes and stays silent would hold a
 # connection to the service for ever
 $MaxJoined = 64
+# with a token, the connections that met and are read for it: 16 bytes within 10 s, or cut off
+$checking = New-Object Collections.ArrayList
 function Tend {
+    foreach ($c in @($checking)) {
+        if ($c.read.IsCompleted) {
+            $n = 0
+            if ($c.read.Status -eq 'RanToCompletion') { $n = $c.read.Result }
+            $c.got += $n
+            if ($n -gt 0 -and $c.got -lt 16) {
+                $c.read = $c.stream.ReadAsync($c.buf, $c.got, 16 - $c.got)
+                $c.read.GetAwaiter().OnCompleted($wakeSet)
+                continue
+            }
+            $checking.Remove($c)
+            if ($c.got -eq 16 -and $Ascii.GetString($c.buf) -ceq $Token) { Join-To $c.sock $c.way }
+            else { $c.sock.Close(); Say '🚫' warn "Someone came $($c.way) without the token: cut off" }
+        } elseif ([DateTime]::UtcNow -gt $c.until) {
+            $checking.Remove($c)
+            $c.sock.Close()
+            Say '🚫' warn "Someone came $($c.way) without the token: cut off"
+        }
+    }
     if ($pairs.Count -eq 0) { return }
     foreach ($q in @($pairs)) {
-        if ($q.up.IsCompleted -and -not $q.upShut) { try { $q.there.Client.Shutdown('Send') } catch { }; $q.upShut = $true }
-        if ($q.down.IsCompleted -and -not $q.downShut) { try { $q.came.Shutdown('Send') } catch { }; $q.downShut = $true }
-        if ($q.upShut -and $q.downShut) {
-            $q.came.Close(); $q.there.Close()
-            $pairs.Remove($q)
-            Say '👋' quiet 'Gone, the one who came'
-        }
+        if (-not $q.done.IsCompleted) { continue }
+        $q.came.Close(); $q.there.Close()
+        $pairs.Remove($q)
+        Say '👋' quiet 'Gone, the one who came'
     }
 }
 
-function Join-To($came) {
+# A connection that met, joined to the service. `way`: how it came, through the relay or directly - said with a token
+function Join-To($came, [string]$way) {
     if ($pairs.Count -ge $MaxJoined) { $came.Close(); Say '⚠️' warn "$MaxJoined connections are joined already: one more turned away"; return }
     $there = Dial-Server
     if (-not $there) { $came.Close(); Say '❌' bad "Someone came; nothing answers at $to"; return }
-    Say '✅' good "Someone came: joined to $to"
+    if ($Token) { Say '✅' good "Someone came ${way}: joined to $to" } else { Say '✅' good "Someone came: joined to $to" }
     $came.NoDelay = $true
     $there.NoDelay = $true
     # Keepalive on the connection that met: on, after 60 s of silence, a probe each 10 s. A client that is gone without a word
     # - a laptop closed - is found, and its connection to the service ended; and a session that is silent stays known to the
     # NATs on the way and to the relay, which forget a silent connection in minutes
     try { [void]$came.IOControl([Net.Sockets.IOControlCode]::KeepAliveValues, [byte[]](1, 0, 0, 0, 0x60, 0xEA, 0, 0, 0x10, 0x27, 0, 0), $null) } catch { }
-    $a = New-Object Net.Sockets.NetworkStream($came, $false)
-    $b = $there.GetStream()
-    $up = $a.CopyToAsync($b, 65536); $down = $b.CopyToAsync($a, 65536)
-    $up.GetAwaiter().OnCompleted($wakeSet); $down.GetAwaiter().OnCompleted($wakeSet)
-    [void]$pairs.Add(@{ came = $came; there = $there; up = $up; down = $down; upShut = $false; downShut = $false })
+    $done = [AdHocRelayPass]::Both($came, $there.Client)
+    $done.GetAwaiter().OnCompleted($wakeSet)
+    [void]$pairs.Add(@{ came = $came; there = $there; done = $done })
     # how many are joined now, of those there may be: said from the second on
     if ($pairs.Count -gt 1) { Say '👥' quiet "$($pairs.Count) of $MaxJoined connections joined now" }
 }
@@ -537,20 +647,230 @@ function Meeting($s) {
     return $false
 }
 
-# A local port for the knocks and the dialing both: free for UDP and for TCP; 0 - none now.
+# ── the direct way, with a token ──
+
+# Where this server can be reached from its local port now, @{ pub; lan; v6 }, each @( address, port ) or $null; learnt at each
+# new local port. The sockets of the knocks of the local ports before, 6 s each: the relay sends a call to where the server
+# dialed it from up to 5 s before - it cannot change that from the path of a packet -, and they answer it there too. The client
+# that called, where it is dialed - @{ how; to; local; sock; at; done } each -, till $until
+$me = $null
+$old = New-Object Collections.ArrayList
+$targets = @()
+$until = [DateTime]::MinValue
+
+# The error of a socket a failure carries, as its name: WouldBlock, ConnectionRefused; '' - none
+function Why($e) {
+    $x = $e.Exception
+    while ($x) { if ($x -is [Net.Sockets.SocketException]) { return "$($x.SocketErrorCode)" }; $x = $x.InnerException }
+    return ''
+}
+
+# The address and the port the relay sees a UDP socket at, by STUN at its first port: a Binding Request of RFC 8489, the answer
+# its XOR-MAPPED-ADDRESS, 32 bytes. Up to $tries requests, $ms milliseconds each. @( address, port ); $null - no answer
+function Stun($u, [int]$tries, [int]$ms) {
+    $to = New-Object Net.IPEndPoint($at.ip, [int]$at.port)
+    $tx = New-Object byte[] 12
+    $random.GetBytes($tx)
+    [byte[]]$ask = [byte[]](0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42) + $tx
+    [byte[]]$kind = 0, 0x20, 0, 8, 0, 1
+    $buf = New-Object byte[] 64
+    for ($i = 0; $i -lt $tries; $i++) {
+        try { [void]$u.Client.SendTo($ask, $to) } catch { return $null }
+        $end = [DateTime]::UtcNow.AddMilliseconds($ms)
+        while (($left = ($end - [DateTime]::UtcNow).TotalMilliseconds) -gt 0) {
+            if (-not $u.Client.Poll([int]($left * 1000), [Net.Sockets.SelectMode]::SelectRead)) { break }
+            [Net.EndPoint]$back = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
+            try { $n = $u.Client.ReceiveFrom($buf, [ref]$back) } catch { continue }
+            if ($n -ne 32 -or -not $back.Equals($to) -or -not (Same ([byte[]]$buf[8..19]) $tx) -or -not (Same ([byte[]]$buf[20..25]) $kind)) { continue }
+            $ip = [Net.IPAddress]::new([byte[]](($buf[28] -bxor 0x21), ($buf[29] -bxor 0x12), ($buf[30] -bxor 0xa4), ($buf[31] -bxor 0x42)))
+            return @("$ip", ((($buf[26] -bxor 0x21) * 256) + ($buf[27] -bxor 0x12)))
+        }
+    }
+    return $null
+}
+
+# The address of this computer the way to the relay goes from; $null - none
+function Lan-Of {
+    $s = New-Object Net.Sockets.Socket('InterNetwork', 'Dgram', 'Udp')
+    try { $s.Connect($at.ip, [int]$at.port); return "$(([Net.IPEndPoint]$s.LocalEndPoint).Address)" } catch { return $null } finally { $s.Close() }
+}
+
+# The IPv6 address of this computer the way out goes from; $null - none, of the link only, or of Teredo
+function V6-Of {
+    $s = New-Object Net.Sockets.Socket('InterNetworkV6', 'Dgram', 'Udp')
+    try {
+        $s.Connect([Net.IPAddress]::Parse('2001:db8::1'), 9)
+        $a = ([Net.IPEndPoint]$s.LocalEndPoint).Address
+        if ($a.IsIPv6LinkLocal -or $a.IsIPv6Teredo -or $a.IsIPv4MappedToIPv6 -or [Net.IPAddress]::IsLoopback($a)) { return $null }
+        $a.ScopeId = 0
+        return "$a"
+    } catch { return $null } finally { $s.Close() }
+}
+
+# Where one can be reached, as the 30 bytes of a call and its answer - the public IPv4 and port, the LAN IPv4 and port, the IPv6
+# and port, zeros for none -, and back
+function Encode($w) {
+    $b = New-Object byte[] 30
+    foreach ($part in @(@('pub', 0, 4), @('lan', 6, 4), @('v6', 12, 16))) {
+        $x = $w[$part[0]]
+        if (-not $x) { continue }
+        [Array]::Copy([Net.IPAddress]::Parse($x[0]).GetAddressBytes(), 0, $b, $part[1], $part[2])
+        $b[$part[1] + $part[2]] = [byte]([int]$x[1] -shr 8); $b[$part[1] + $part[2] + 1] = [byte]([int]$x[1] -band 255)
+    }
+    return , $b
+}
+function Decode([byte[]]$b) {
+    $w = @{ pub = $null; lan = $null; v6 = $null }
+    foreach ($part in @(@('pub', 0, 4), @('lan', 6, 4), @('v6', 12, 16))) {
+        [byte[]]$a = $b[$part[1]..($part[1] + $part[2] - 1)]
+        if (-not ($a | Where-Object { $_ })) { continue }
+        $w[$part[0]] = @("$([Net.IPAddress]::new($a))", ([int]$b[$part[1] + $part[2]] * 256 + $b[$part[1] + $part[2] + 1]))
+    }
+    return $w
+}
+
+# Where this server can be reached from the local port of the UDP socket $u: the public address and port, when its NAT keeps the
+# local port - else none -, the LAN address, the IPv6 address. Two STUN requests of half a second: the knocks of this port wait
+function Here($u, [int]$local) {
+    $w = @{ pub = $null; lan = $null; v6 = $null }
+    $pub = Stun $u 2 500
+    if ($pub -and $pub[1] -eq $local) { $w.pub = $pub }
+    $lan = Lan-Of
+    if ($lan) { $w.lan = @($lan, $local) }
+    $v6 = V6-Of
+    if ($v6) { $w.v6 = @($v6, $local) }
+    return $w
+}
+
+# Where to dial the other: IPv6 when both have it; behind one NAT - one public address - its LAN address, else its public one
+function Targets($mine, $other) {
+    $t = @()
+    if ($mine.v6 -and $other.v6) { $t += @{ how = 'over IPv6'; to = $other.v6 } }
+    if ($mine.pub -and $other.pub) {
+        if ($mine.pub[0] -eq $other.pub[0]) { if ($other.lan) { $t += @{ how = 'in the LAN'; to = $other.lan } } }
+        else { $t += @{ how = 'at its public address'; to = $other.pub } }
+    }
+    return , $t
+}
+
+# The targets as words: 203.0.113.5:51000 at its public address, [2001:db8::5]:51000 over IPv6
+function Ways($ts) {
+    return (@($ts) | ForEach-Object { $a = $_.to[0]; if ($a.Contains(':')) { $a = "[$a]" }; "${a}:$($_.to[1]) $($_.how)" }) -join ', '
+}
+
+# A TCP socket from the local port, dialing there, not waiting. $null - it could not
+function Dial([int]$local, [string]$address, [int]$port) {
+    $ip = [Net.IPAddress]::Parse($address)
+    $s = New-Object Net.Sockets.Socket($ip.AddressFamily, 'Stream', 'Tcp')
+    try {
+        $s.SetSocketOption('Socket', 'ReuseAddress', $true)
+        if ($ip.AddressFamily -eq 'InterNetworkV6') { $s.Bind((New-Object Net.IPEndPoint([Net.IPAddress]::IPv6Any, $local))) }
+        else { $s.Bind((New-Object Net.IPEndPoint([Net.IPAddress]::Any, $local))) }
+        $s.Blocking = $false
+        try { $s.Connect($ip, $port) } catch { if ((Why $_) -notin 'WouldBlock', 'InProgress') { throw } }
+        return $s
+    } catch { $s.Close(); return $null }
+}
+
+# A dialing socket that nothing came back to yet: SYN sent. Windows: SIO_TCP_INFO, the state first; Linux: TCP_INFO, its first
+# byte. When the system says nothing - as SYN sent
+function Sent($s) {
+    try {
+        $info = New-Object byte[] 256
+        if ($IsLinux) { if ($s.GetRawSocketOption(6, 11, $info) -gt 0) { return $info[0] -eq 2 } }
+        elseif ($env:OS -eq 'Windows_NT') { if ($s.IOControl([int]-671088601, [BitConverter]::GetBytes([int]0), $info) -ge 4) { return [BitConverter]::ToInt32($info, 0) -eq 2 } }
+    } catch { }
+    return $true
+}
+
+# The dialing of a target: one socket; a new one each 300 ms while nothing came back, and at once after a refusal. The first SYN
+# of one may reach the router of the other before that router saw the SYN of its own side; the next one meets. Connected: read
+# for the token, as any connection
+function Punch($t) {
+    if ($t.done) { return }
+    if ($t.sock) {
+        $done = $t.sock.Poll(0, [Net.Sockets.SelectMode]::SelectWrite)
+        if ($done -or $t.sock.Poll(0, [Net.Sockets.SelectMode]::SelectError)) {
+            $s = $t.sock; $t.sock = $null
+            if ($done -and [int]$s.GetSocketOption('Socket', 'Error') -eq 0) {
+                $t.done = $true
+                $s.Blocking = $true
+                Check-Token $s "directly, $(Ways $t)"
+                return
+            }
+            $s.Close()
+        } elseif (([DateTime]::UtcNow - $t.at).TotalMilliseconds -ge 300 -and (Sent $t.sock)) { $t.sock.Close(); $t.sock = $null }
+    }
+    if (-not $t.sock) { $t.sock = Dial $t.local $t.to[0] $t.to[1]; $t.at = [DateTime]::UtcNow }
+}
+
+# A connection that met, read for its token before it is joined - the program of the client that dials the port of meeting itself
+# sends none, nor does a guesser, nor a way of the client other than the one it kept
+function Check-Token($s, [string]$way) {
+    if ($pairs.Count + $checking.Count -ge $MaxJoined) { $s.Close(); Say '⚠️' warn "$MaxJoined connections are joined already: one more turned away"; return }
+    $c = @{ sock = $s; way = $way; got = 0; buf = (New-Object byte[] 16); until = [DateTime]::UtcNow.AddSeconds(10) }
+    $c.stream = New-Object Net.Sockets.NetworkStream($s, $false)
+    $c.read = $c.stream.ReadAsync($c.buf, 0, 16)
+    $c.read.GetAwaiter().OnCompleted($wakeSet)
+    [void]$checking.Add($c)
+}
+
+# The calls the sockets of the knocks heard - 38 bytes from the port of meeting, the key of a call first -: each answered by the
+# socket that heard it with where this server can be reached, and the client dialed where it can be, 3 s. $false - the socket of
+# the knocks heard a refusal: the relay knows the key of the knocks from another address
+function Calls {
+    foreach ($s in @($knocker) + @($old | ForEach-Object { $_.sock })) {
+        while ($true) {
+            try {
+                if (-not $s.Client.Poll(0, [Net.Sockets.SelectMode]::SelectRead)) { break }
+                $ep = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
+                $got = $s.Receive([ref]$ep)
+            } catch { if ($s -eq $knocker) { return $false }; break }
+            if ($got.Length -ne 38 -or -not $me -or -not (Same ([byte[]]$got[0..7]) $Call)) { continue }
+            [byte[]]$answer = Encode $me
+            try { [void]$s.Send($answer, $answer.Length) } catch { }
+            foreach ($t in $targets) { if ($t.sock) { $t.sock.Close() } }
+            $script:targets = Targets $me (Decode ([byte[]]$got[8..37]))
+            foreach ($t in $targets) { $t.local = $from; $t.sock = $null; $t.at = [DateTime]::MinValue; $t.done = $false }
+            $script:until = [DateTime]::UtcNow.AddSeconds(3)
+            if ($targets.Count) { Say '📞' quiet "A client called: dialing it, $(Ways $targets)" }
+            else { Say '📞' quiet 'A client called: nowhere to dial it - it meets this server through the relay' }
+        }
+    }
+    return $true
+}
+
+# With a token, a look at the calls and the dialings of the client that called; the sockets of the knocks before let go after
+# their 6 s. $false - a knock refused
+function Direct {
+    $now = [DateTime]::UtcNow
+    foreach ($o in @($old)) { if ($o.until -le $now) { $o.sock.Close(); $old.Remove($o) } }
+    if ($targets.Count -and $now -ge $until) { foreach ($t in $targets) { if ($t.sock) { $t.sock.Close() } }; $script:targets = @() }
+    if (-not (Calls)) { return $false }
+    foreach ($t in $targets) { Punch $t }
+    return $true
+}
+
+# A local port for the knocks and the dialing both: free for UDP and for TCP; 0 - none now. With a token, where this server can be
+# reached from it is learnt at once, and the socket of the knocks before answers calls 6 s more
 function Pick {
     for ($i = 0; $i -lt 20; $i++) {
-        $u = New-Object Net.Sockets.UdpClient(0)
-        $n = ([Net.IPEndPoint]$u.Client.LocalEndPoint).Port
+        # a port at random of the dynamic ones, 49152-65535: Windows keeps blocks of a hundred ports from TCP and from UDP - Hyper-V,
+        # WSL, Docker reserve them -, and the ports it gives by itself, one after another, run into such a block now and then: a
+        # port free for UDP, refused to TCP, many picks in a row
+        $n = Get-Random -Minimum 49152 -Maximum 65536
+        try { $u = New-Object Net.Sockets.UdpClient($n) } catch { continue }
         $t = New-Object Net.Sockets.Socket('InterNetwork', 'Stream', 'Tcp')
         try { $t.SetSocketOption('Socket', 'ReuseAddress', $true); $t.Bind((New-Object Net.IPEndPoint([Net.IPAddress]::Any, $n))); $free = $true }
         catch { $free = $false }
         $t.Close()
         if (-not $free) { $u.Close(); continue }
         # a refusal of the relay is heard by this socket: the knock came from another address than the relay knows
-        if ($script:knocker) { $script:knocker.Close() }
+        if ($script:knocker -and $Call) { [void]$old.Add(@{ sock = $script:knocker; until = [DateTime]::UtcNow.AddSeconds(6) }) }
+        elseif ($script:knocker) { $script:knocker.Close() }
         $script:knocker = $u
         $script:from = $n
+        if ($Call) { $script:me = Here $u $n }
         return $n
     }
     return 0
@@ -582,12 +902,16 @@ while ($true) {
         if ($knocked -gt [DateTime]::UtcNow) { $knocked = [DateTime]::MinValue }
         # A knock refused - the socket of the knocks, connected to the port of meeting, has it to read: the relay knows the key
         # of the knocks, but from another address than this computer has now. Bound again at once, for where it is
-        try {
-            if ($knocker.Client.Connected -and $knocker.Client.Poll(0, [Net.Sockets.SelectMode]::SelectRead)) {
-                $ep = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
-                [void]$knocker.Receive([ref]$ep)
-            }
-        } catch { $lost = $true; $knocked = [DateTime]::MinValue; break }
+        # With a token what it heard may be a call too: answered
+        if ($Call -and $knocker.Client.Connected) { if (-not (Direct)) { $lost = $true; $knocked = [DateTime]::MinValue; break } }
+        else {
+            try {
+                if ($knocker.Client.Connected -and $knocker.Client.Poll(0, [Net.Sockets.SelectMode]::SelectRead)) {
+                    $ep = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
+                    [void]$knocker.Receive([ref]$ep)
+                }
+            } catch { $lost = $true; $knocked = [DateTime]::MinValue; break }
+        }
         if (([DateTime]::UtcNow - $knocked).TotalSeconds -ge $KnockEvery) {
             # no way out now - Wi-Fi joining again, the cable out, the computer waking -: no knock went, nothing is dialed after
             # it; again in a moment. The script waits on, it does not end
@@ -607,15 +931,19 @@ while ($true) {
         }
         # till the try ends, $TryFor seconds at most - whole, past the look at the relay too: one cut short is one more try, and
         # its SYNs, those of the start a second apart, are most of them; the look waits for its end. The connections joined are
-        # tended meanwhile - at once when a way of one ends
+        # tended meanwhile - at once when a way of one ends. With a token the calls are looked at each 100 ms, and the client that
+        # called is dialed each 20 ms
         $end = [DateTime]::UtcNow.AddSeconds($TryFor)
         $waits = [Threading.WaitHandle[]]@($try.AsyncWaitHandle, $wake.WaitHandle)
         while (-not $try.IsCompleted) {
             $ms = [int]($end - [DateTime]::UtcNow).TotalMilliseconds
             if ($ms -le 0) { break }
-            if ($ms -gt 1000) { $ms = 1000 }
+            $most = 1000
+            if ($Call) { $most = $(if ($targets.Count) { 20 } else { 100 }) }
+            if ($ms -gt $most) { $ms = $most }
             if ([Threading.WaitHandle]::WaitAny($waits, $ms) -eq 1) { $wake.Reset() }
             Tend
+            if ($Call -and -not (Direct)) { $lost = $true; $again = $true; $knocked = [DateTime]::MinValue; break }
             # A try may be longer than the time between two knocks: knocked meanwhile as each is due - the NAT of this computer
             # must keep the mapping of the knocks -, and a knock refused heard then: bound again at once
             if (([DateTime]::UtcNow - $knocked).TotalSeconds -ge $KnockEvery) {
@@ -655,7 +983,10 @@ while ($true) {
             if ($began) { $from = 0; $knocked = [DateTime]::MinValue }
         }
         # the meeting closed the port: the next try knocks at once
-        if ($met) { Join-To $tcp; $from = 0; $knocked = [DateTime]::MinValue; $refusals = 0; break }
+        if ($met) {
+            if ($Call) { Check-Token $tcp 'through the relay' } else { Join-To $tcp }
+            $from = 0; $knocked = [DateTime]::MinValue; $refusals = 0; break
+        }
         $tcp.Close()
         if ($again) { break }
         # refused at once, or the network is down: a pause, not a storm of tries - 2 s at most, whatever the clock says

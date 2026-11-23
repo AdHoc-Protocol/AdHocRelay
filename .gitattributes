@@ -9,3 +9,7 @@ pack.sh text eol=lf
 Server/*.pl text eol=lf
 Server/*.ps1 text eol=crlf
 Server/*.cmd text eol=crlf
+# AdHoc Relay Client: the same
+Client/*.pl text eol=lf
+Client/*.ps1 text eol=crlf
+Client/*.cmd text eol=crlf

@@ -5,6 +5,7 @@
 #
 #   perl adhoc-relay-server.pl                                              asks, as a menu; the answers kept for the next start
 #   perl adhoc-relay-server.pl --meet 'Tr7kQ2xZp4Lm9sWd👉router.example.org:40000👉' --forward 22
+#   perl adhoc-relay-server.pl --meet 'Tr7kQ2xZp4Lm9sWd👉router.example.org:40000👉' --forward 22 --token K7QM2XHP9RTA4WZD
 #
 # The line is a key, 👉, the relay and its first port, 👉 - of the password, of a fixed port, of a user: all alike. No key travels:
 # the script binds a port of meeting at the relay - the id of its key, its own id, 8 random bytes of this start, and 8 bytes of
@@ -18,14 +19,21 @@
 # Fx2pL8wNq7Rk3mZa🌐Rk8mP2qLx3Vb7NtY👉203.0.113.7:40000🌐Hx4nT7wAc5Jd2QeL👉198.51.100.9:40000🌐40000👉 -, and the address is read
 # there, again every 30 s; an answer the key of reading did not sign is not taken. The signs may be typed as > and @. Only perl
 # and its own modules: nothing to install.
+#
+# With a token, 16 letters and digits, the client is AdHoc Relay Client, and the two meet directly when they can:
+# the knocks carry the key of a call of the token, 8 bytes of SHA-256 of "adhoc-relay call" and the token; a call the relay sends
+# on is answered with where this server can be reached - by STUN at the first port of the relay, in its LAN, over IPv6 -, and
+# the client is dialed there from the local port of the knocks, a new SYN each 300 ms, 3 s. Each connection, through the relay
+# or directly, begins with the token: one without it is cut off, the program of the client that dials the line itself too.
 
 use strict;
 use warnings;
 use utf8;
 use IO::Socket::INET;
 use IO::Select;
-use Socket qw(PF_INET SOCK_STREAM SOCK_DGRAM IPPROTO_UDP SOL_SOCKET SO_ERROR SO_REUSEADDR SO_KEEPALIVE IPPROTO_TCP TCP_NODELAY INADDR_ANY inet_aton pack_sockaddr_in unpack_sockaddr_in);
-use POSIX qw(EINPROGRESS ECONNREFUSED ECONNRESET EADDRINUSE EADDRNOTAVAIL WNOHANG);
+use Socket qw(PF_INET PF_INET6 AF_INET6 SOCK_STREAM SOCK_DGRAM IPPROTO_UDP IPPROTO_IPV6 IPV6_V6ONLY SOL_SOCKET SO_ERROR SO_REUSEADDR SO_KEEPALIVE IPPROTO_TCP TCP_NODELAY INADDR_ANY IN6ADDR_ANY inet_aton inet_ntoa inet_pton inet_ntop pack_sockaddr_in unpack_sockaddr_in pack_sockaddr_in6 unpack_sockaddr_in6);
+use POSIX qw(EINVAL ENOSYS EINPROGRESS ECONNREFUSED ECONNRESET EADDRINUSE EADDRNOTAVAIL WNOHANG);
+use Config;
 use Time::HiRes ();
 use File::Basename qw(dirname);
 use File::Spec;
@@ -113,7 +121,7 @@ sub save_kept {
     my ($k) = @_;
     open my $f, '>:encoding(UTF-8)', $kept_file or return say('💾', 'quiet', "Not kept for the next start: $!");
     print $f "# AdHoc Relay, the server: what the menu offers on Enter\n";
-    print $f "$_ = $k->{$_}\n" for grep { defined $k->{$_} } qw(service forward meet password);
+    print $f "$_ = $k->{$_}\n" for grep { defined $k->{$_} } qw(service forward meet password token);
     close $f;
     chmod 0600, $kept_file; # the password of the relay: for this user alone
 }
@@ -222,8 +230,18 @@ sub rest_of {
 # The keys of reading hidden, for the screen.
 sub hidden { (my $t = pretty($_[0])) =~ s/\x{1F310}[A-Za-z0-9]{16}/\x{1F310}****************/g; return $t }
 
-# A password or a key: 16 letters and digits.
+# A password or a key: 16 letters and digits. A token is the same.
 sub key_ok { ($_[0] // '') =~ /^[A-Za-z0-9]{16}\z/ }
+
+# A new token: 16 letters and digits of the random bytes of the system, those mistaken for one another left out - as the relay
+# makes its keys. Each character alike: a byte past the last whole run of the letters is left out, not folded onto the first
+sub new_token {
+    my $abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    my $whole = 256 - 256 % length $abc;
+    my $t = '';
+    $t .= join '', map { substr($abc, ord($_) % length $abc, 1) } grep { ord($_) < $whole } split //, random8() while length $t < 16;
+    return substr($t, 0, 16);
+}
 
 # What a whole line is, as docs/lines.tsv writes it - the line whole, the signs of the keyboard, the ports put in where the line
 # has none -, or `error`: what every program takes alike.
@@ -285,27 +303,39 @@ sub menu {
         $p->{key} = line('Its password or key, 16 letters and digits:');
         say('💡', 'warn', 'The password of a relay, or a key of it, is 16 letters and digits') unless key_ok($p->{key});
     }
+    # the token: Enter keeps what was last time, a token or none
+    say('🎫', 'quiet', 'With a token only AdHoc Relay Client gets in, given the token too, and directly when the two can. Without one, any program of the client, through the relay');
+    my $token;
+    while (1) {
+        my $typed = line(key_ok($k->{token}) ? 'The token - Enter for the one of last time, - for none, + for a new one:' : 'The token, 16 letters and digits - + for a new one, Enter for none:');
+        $token = $typed eq '' ? (key_ok($k->{token}) ? $k->{token} : undef) : $typed eq '-' ? undef : $typed eq '+' ? new_token() : $typed;
+        last if !defined $token || key_ok($token);
+        say('💡', 'warn', 'A token is 16 letters and digits, as a key; + makes one');
+    }
     $k->{service} = $service;
     $k->{forward} = $forward if $service == 5;
     $k->{meet} = pretty($meet); # kept as people see it: the emoji
     $k->{password} = $p->{key};
+    $k->{token} = $token;
     save_kept($k);
     print "\n";
-    return ($forward, $p->{key} . $meet);
+    return ($forward, $p->{key} . $meet, $token);
 }
 
 # ── the arguments, or the menu ──
 
-my ($forward, $given);
+my ($forward, $given, $TOKEN);
 while (my $a = shift @ARGV) {
     if ($a eq '--forward') { $forward = target(shift(@ARGV) // '') or die "--forward <port> or <address:port>, such as 22 or 192.168.1.5:80\n" }
     elsif ($a eq '--meet') { $given = shift @ARGV }
+    elsif ($a eq '--token') { $TOKEN = shift(@ARGV) // ''; die "--token <16 letters and digits>, such as K7QM2XHP9RTA4WZD\n" unless key_ok($TOKEN) }
     elsif ($a eq '--parse') { print parsed(shift(@ARGV) // ''), "\n"; exit 0 } # what it makes of a line: docs/lines.tsv
     elsif ($a eq '--vector') { print vector(split ' ', shift(@ARGV) // ''), "\n"; exit 0 } # the bytes it makes: docs/vectors.tsv
     else {
-        print "perl adhoc-relay-server.pl [--meet <the line of the relay> --forward <port> | <address:port>]\n",
+        print "perl adhoc-relay-server.pl [--meet <the line of the relay> --forward <port> | <address:port> [--token <token>]]\n",
             "  the line as its owner gave it: <password or key>👉<relay>[:40000]👉, or with the address read:\n",
             "  <key>🌐<key of reading>👉<keeper>:<its port>[🌐...]🌐<first port of the relay>👉 - or > @ for 👉 🌐\n",
+            "  the token: 16 letters and digits; only AdHoc Relay Client, given it too, gets in - directly when the two can\n",
             "  with no arguments it asks, and keeps the answers beside it\n";
         exit 2;
     }
@@ -315,8 +345,9 @@ print "\n ", paint('AdHoc Relay', 'name'), paint(' · the server', 'news'), "\n 
     paint('the client reaches a service of this server through a relay: no port forwarded on the routers', 'quiet'), "\n";
 if (!defined $forward || !defined $given) {
     die "--meet and --forward go together\n" if defined $forward || defined $given;
+    die "--token goes with --meet and --forward\n" if defined $TOKEN;
     die "no terminal to ask in: give --meet and --forward\n" unless -t STDIN;
-    ($forward, $given) = menu();
+    ($forward, $given, $TOKEN) = menu();
 }
 my $p = point($given);
 die "--meet <the line of the relay>, $LINES\n" unless $p && key_ok($p->{key});
@@ -356,6 +387,11 @@ sub random8 {
 my $id = random8();
 my $KEY = $p->{key};
 utf8::downgrade($KEY);
+# with a token, the key of a call of it: what the knocks carry after the key of the knocks, and a call begins with - the first 8
+# bytes of SHA-256 of "adhoc-relay call" and the token. The token itself goes only to the client, the first bytes of each
+# connection
+utf8::downgrade($TOKEN) if defined $TOKEN;
+my $CALL = defined $TOKEN ? substr(sha256("adhoc-relay call$TOKEN"), 0, 8) : undef;
 
 # the id of a key, 8 bytes: what this server names its key by - the key itself never travels
 sub kid { my $k = $_[0]; utf8::downgrade($k); substr(sha256("AdHoc Relay id$k"), 0, 8) }
@@ -470,7 +506,7 @@ sub ask {
         # a time of 0 would knock, dial or bind without end: as by default then
         my ($k, $t, $r) = unpack 'C3', substr($got, 6, 3);
         ($KNOCK, $TRY, $REBIND) = ($k || 20, $t || 31, $r || 30);
-        $knock = knock_key($KEY, $id, substr($got, 0, 2), $as);
+        $knock = knock_key($KEY, $id, substr($got, 0, 2), $as) . ($CALL // '');
         return unpack('n', $got);
     }
     return undef;
@@ -507,6 +543,15 @@ sub show {
         last if $copied;
     }
     say('📋', 'good', 'It is in your clipboard already: just paste it into a message') if $copied;
+    # with a token the program of the client dials AdHoc Relay Client, on its own computer: it listens at the port of meeting
+    # there, unless told another
+    if (defined $TOKEN) {
+        # the first port of the relay, when it is not 40000: AdHoc Relay Client asks STUN there - as perl and as PowerShell take it
+        my ($first, $windows) = $at->[1] == 40000 ? ('', '') : (" --first $at->[1]", " -First $at->[1]");
+        say('🎫', 'news', "The token, with the line: $TOKEN - only AdHoc Relay Client gets in; a program that dials the line itself is cut off");
+        say('🧩', 'news', "AdHoc Relay Client on the client: perl adhoc-relay-client.pl --meet $line --token $TOKEN --listen $port$first · Windows: adhoc-relay-client.cmd -Meet $line -Token $TOKEN -Listen $port$windows");
+        ($host, $line) = ('127.0.0.1', "127.0.0.1:$port");
+    }
     if ($rdp) { say('🖥️', 'news', "Remote Desktop Connection ( mstsc ) of the client: as the computer, $line") }
     elsif ($forward =~ /:22$/) { say('🔐', 'news', "On the client: ssh -p $port <user>\@$host") }
     elsif ($forward =~ /:80$/) { say('🌐', 'news', "A browser of the client: http://$line") }
@@ -528,8 +573,137 @@ $SIG{PIPE} = 'IGNORE';
 # server by it - a client behind the same NAT is never taken for the server
 my $from = 0;
 my $knocker;
+# the try of dialing the relay now: a process of a connection does not keep it open
+my $trying;
 
-# A local port for the knocks and the dialing both: free for UDP and for TCP. 0 - none now.
+# ── the direct way, with a token ──
+
+# Where this server can be reached from its local port now, { pub, lan, v6 }, each [ address, port ] or undef; learnt at each new
+# local port. The sockets of the knocks of the local ports before, 6 s each: the relay sends a call to where the server dialed it
+# from up to 5 s before - it cannot change that from the path of a packet -, and they answer it there too. The client that
+# called, where it is dialed - [ { how, to, sock, at, done } ] -, till `until`
+my ($me, @old, @targets, $until);
+
+# SO_REUSEADDR on a TCP socket of the local port, and with a token SO_REUSEPORT too where the system has it: the try of dialing
+# the relay and the dialings of a client go from the one local port at once, and macOS lets two sockets bind one port only so
+sub reuse {
+    my ($s) = @_;
+    setsockopt($s, SOL_SOCKET, SO_REUSEADDR, 1);
+    eval { setsockopt($s, SOL_SOCKET, Socket::SO_REUSEPORT(), 1) } if $CALL;
+    return 1;
+}
+
+# The address and the port the relay sees a UDP socket at, by STUN at its first port: a Binding Request of RFC 8489, the
+# answer its XOR-MAPPED-ADDRESS, 32 bytes. Up to `tries` requests, `wait` seconds each. undef - no answer
+sub stun {
+    my ($u, $tries, $wait) = @_;
+    my $to = pack_sockaddr_in($at->[1], $at->[0]);
+    my $tx = random8() . substr(random8(), 0, 4);
+    for (1 .. $tries) {
+        send($u, "\x00\x01\x00\x00\x21\x12\xa4\x42$tx", 0, $to);
+        my $end = Time::HiRes::time() + $wait;
+        while ((my $left = $end - Time::HiRes::time()) > 0) {
+            IO::Select->new($u)->can_read($left) or last;
+            my $back = recv($u, my $got, 64, 0);
+            next unless defined $back && $back eq $to && length $got == 32 && substr($got, 8, 12) eq $tx && substr($got, 20, 6) eq "\x00\x20\x00\x08\x00\x01";
+            return [ inet_ntoa(substr($got, 28, 4) ^ "\x21\x12\xa4\x42"), unpack('n', substr($got, 26, 2)) ^ 0x2112 ];
+        }
+    }
+    return undef;
+}
+
+# The address of this computer the way to the relay goes from; undef - none
+sub lan_of {
+    my $s = IO::Socket::INET->new(PeerAddr => inet_ntoa($at->[0]), PeerPort => $at->[1], Proto => 'udp') or return undef;
+    return $s->sockhost;
+}
+
+# The IPv6 address of this computer the way out goes from; undef - none, or of the link only
+sub v6_of {
+    socket(my $s, PF_INET6, SOCK_DGRAM, IPPROTO_UDP) or return undef;
+    connect($s, pack_sockaddr_in6(9, inet_pton(AF_INET6, '2001:db8::1'))) or return undef;
+    my $text = inet_ntop(AF_INET6, (unpack_sockaddr_in6(getsockname($s)))[1]);
+    return $text =~ /^fe80/i ? undef : $text;
+}
+
+# Where one can be reached, as the 30 bytes of a call and its answer - the public IPv4 and port, the LAN IPv4 and port, the IPv6
+# and port, zeros for none -, and back
+sub encode {
+    my ($w) = @_;
+    return ($w->{pub} ? inet_aton($w->{pub}[0]) . pack('n', $w->{pub}[1]) : "\0" x 6)
+        . ($w->{lan} ? inet_aton($w->{lan}[0]) . pack('n', $w->{lan}[1]) : "\0" x 6)
+        . ($w->{v6} ? inet_pton(AF_INET6, $w->{v6}[0]) . pack('n', $w->{v6}[1]) : "\0" x 18);
+}
+sub decode {
+    my ($b) = @_;
+    my %w;
+    $w{pub} = [ inet_ntoa(substr($b, 0, 4)), unpack('n', substr($b, 4, 2)) ] if substr($b, 0, 4) ne "\0" x 4;
+    $w{lan} = [ inet_ntoa(substr($b, 6, 4)), unpack('n', substr($b, 10, 2)) ] if substr($b, 6, 4) ne "\0" x 4;
+    $w{v6} = [ inet_ntop(AF_INET6, substr($b, 12, 16)), unpack('n', substr($b, 28, 2)) ] if substr($b, 12, 16) ne "\0" x 16;
+    return \%w;
+}
+
+# Where this server can be reached from the local port of the UDP socket `u`: the public address and port, when its NAT keeps the
+# local port - else none -, the LAN address, the IPv6 address. Two STUN requests of half a second: the knocks of this port wait
+sub here {
+    my ($u, $local) = @_;
+    my $pub = stun($u, 2, 0.5);
+    my $lan = lan_of();
+    my $v6 = v6_of();
+    return { pub => ($pub && $pub->[1] == $local ? $pub : undef), lan => ($lan ? [ $lan, $local ] : undef), v6 => ($v6 ? [ $v6, $local ] : undef) };
+}
+
+# Where to dial the other: IPv6 when both have it; behind one NAT - one public address - its LAN address, else its public one
+sub targets {
+    my ($mine, $other) = @_;
+    my @t;
+    push @t, { how => 'over IPv6', to => $other->{v6} } if $mine->{v6} && $other->{v6};
+    if ($mine->{pub} && $other->{pub}) {
+        if ($mine->{pub}[0] eq $other->{pub}[0]) { push @t, { how => 'in the LAN', to => $other->{lan} } if $other->{lan} }
+        else { push @t, { how => 'at its public address', to => $other->{pub} } }
+    }
+    return @t;
+}
+
+# The targets as words: 203.0.113.5:51000 at its public address, [2001:db8::5]:51000 over IPv6
+sub ways { join ', ', map { ($_->{to}[0] =~ /:/ ? "[$_->{to}[0]]" : $_->{to}[0]) . ":$_->{to}[1] $_->{how}" } @_ }
+
+# A TCP socket from the local port, dialing there, not waiting. undef - it could not
+sub dial {
+    my ($local, $host, $port) = @_;
+    my $six = $host =~ /:/;
+    my $s = IO::Socket::INET->new;
+    socket($s, $six ? PF_INET6 : PF_INET, SOCK_STREAM, IPPROTO_TCP) or return undef;
+    reuse($s);
+    setsockopt($s, IPPROTO_IPV6, IPV6_V6ONLY, 1) if $six;
+    bind($s, $six ? pack_sockaddr_in6($local, IN6ADDR_ANY) : pack_sockaddr_in($local, INADDR_ANY)) or return undef;
+    $s->blocking(0);
+    connect($s, $six ? pack_sockaddr_in6($port, inet_pton(AF_INET6, $host)) : pack_sockaddr_in($port, inet_aton($host)))
+        or $! == EINPROGRESS or return undef;
+    return $s;
+}
+
+# The state of a dialing socket: 2 - SYN sent, nothing came back yet. TCP_INFO of Linux, TCP_CONNECTION_INFO of macOS, the first
+# byte of both; elsewhere, as SYN sent
+sub sent {
+    my ($s) = @_;
+    my $opt = $^O eq 'linux' ? 11 : $^O eq 'darwin' ? 0x106 : return 1;
+    my $info = getsockopt($s, IPPROTO_TCP, $opt) // return 1;
+    return unpack('C', $info) == 2;
+}
+
+# The dialing of a target: one socket; a new one each 300 ms while nothing came back, and at once after a refusal. The first SYN
+# of one may reach the router of the other before that router saw the SYN of its own side; the next one meets
+sub punch {
+    my ($t) = @_;
+    if ($t->{sock} && Time::HiRes::time() - $t->{at} >= 0.3 && sent($t->{sock})) { close $t->{sock}; $t->{sock} = undef }
+    return if $t->{sock};
+    $t->{sock} = dial($t->{local}, @{ $t->{to} }) or return;
+    $t->{at} = Time::HiRes::time();
+}
+
+# A local port for the knocks and the dialing both: free for UDP and for TCP. 0 - none now. With a token, where this server can
+# be reached from it is learnt at once, and the socket of the knocks before answers calls 6 s more
 sub pick {
     for (1 .. 20) {
         # bound by hand: IO::Socket::INET binds no port 0
@@ -541,12 +715,15 @@ sub pick {
         my $free = bind($t, pack_sockaddr_in($p, INADDR_ANY));
         close $t;
         next unless $free;
-        close $knocker if $knocker;
+        if ($knocker && $CALL) { push @old, { sock => $knocker, until => Time::HiRes::time() + 6 } }
+        elsif ($knocker) { close $knocker }
         $knocker = $u;
+        $me = here($u, $p) if $CALL;
         return $from = $p;
     }
     return 0;
 }
+
 
 # The knock goes every KNOCK seconds, and at once at a new address, after a meeting, or when the port refused: the fewer packets
 # with the key, the less there is to watch. A try of dialing waits up to TRY seconds, the next comes at once.
@@ -557,15 +734,65 @@ my $knocked = 0;
 # this computer has now. Bound again at once, for where it is
 my ($refusals, $lost) = (0, 0);
 
+# With a token: one look, up to `wait` seconds, at the calls, the dialings of the client that called and the try of dialing the
+# relay. A call - 38 bytes from the port of meeting, the key of a call first - is answered by the socket that heard it with
+# where this server can be reached, and the client is dialed where it can be, 3 s; a dialing that connected is served as any
+# connection - the token first. 1 - the try is ready; -1 - a knock refused: $lost; 0 - neither yet
+sub direct {
+    my ($tcp, $wait) = @_;
+    # the connections that ended taken off here too: a try of dialing is long, and the count would wait for its end
+    $live-- while $live > 0 && waitpid(-1, WNOHANG) > 0;
+    my $now = Time::HiRes::time();
+    for (grep { $_->{until} <= $now } @old) { close $_->{sock} }
+    @old = grep { $_->{until} > $now } @old;
+    if (@targets && $now >= $until) { close $_->{sock} for grep { $_->{sock} } @targets; @targets = () }
+    punch($_) for grep { !$_->{done} } @targets;
+    # a dialing goes on each 50 ms; else the calls are looked at each second at most, and the sockets of before let go
+    my $most = @targets ? 0.05 : 1;
+    $wait = $most if $wait > $most;
+    my ($readable, $writable) = IO::Select->select(IO::Select->new($knocker, map { $_->{sock} } @old),
+        IO::Select->new($tcp, map { $_->{sock} } grep { $_->{sock} } @targets), undef, $wait);
+    for my $s (@{ $readable // [] }) {
+        my $back = recv($s, my $got, 64, 0);
+        # a refusal the socket of the knocks heard: the relay knows the key of the knocks from another address
+        if (!defined $back) { if ($s == $knocker && $! == ECONNREFUSED) { ($lost, $knocked) = (1, 0); return -1 } next }
+        next unless length $got == 38 && substr($got, 0, 8) eq $CALL && $me;
+        send($s, encode($me), 0);
+        close $_->{sock} for grep { $_->{sock} } @targets;
+        @targets = map { +{ %$_, local => $from } } targets($me, decode(substr($got, 8)));
+        $until = Time::HiRes::time() + 3;
+        say('📞', 'quiet', @targets ? 'A client called: dialing it, ' . ways(@targets) : 'A client called: nowhere to dial it - it meets this server through the relay');
+    }
+    my $ready = 0;
+    for my $s (@{ $writable // [] }) {
+        if ($s == $tcp) { $ready = 1; next }
+        my ($t) = grep { $_->{sock} && $_->{sock} == $s } @targets or next;
+        $t->{sock} = undef;
+        # refused, or no way there: dialed again at the next look, while the time lasts
+        if (unpack('i', getsockopt($s, SOL_SOCKET, SO_ERROR) // pack('i', 0))) { close $s; next }
+        $t->{done} = 1;
+        $s->blocking(1);
+        serve($s, 'directly, ' . ways($t));
+    }
+    return $ready;
+}
+
 # Waits up to `seconds` for a try of dialing to end - met, or refused -, knocking meanwhile as each knock is due: a try may be
 # longer than the time between two knocks, and the NAT of this computer must keep the mapping of the knocks. A knock refused
-# meanwhile - the socket of the knocks has it to read - ends the wait, with $lost. True: the socket of the try is ready
+# meanwhile - the socket of the knocks has it to read - ends the wait, with $lost. With a token the calls are answered meanwhile,
+# and the client that called is dialed. True: the socket of the try is ready
 sub waiting {
     my ($tcp, $seconds) = @_;
     my ($end, $sel) = (time + $seconds, IO::Select->new($tcp));
     while ((my $left = $end - time) > 0) {
         my $due = $knocked + $KNOCK - time;
-        return 1 if $sel->can_write($due < $left ? ($due > 0 ? $due : 0) : $left);
+        my $wait = $due < $left ? ($due > 0 ? $due : 0) : $left;
+        if ($CALL) {
+            my $ready = direct($tcp, $wait);
+            return $ready > 0 if $ready;
+        } else {
+            return 1 if $sel->can_write($wait);
+        }
         next if time - $knocked < $KNOCK;
         if (unpack('i', getsockopt($knocker, SOL_SOCKET, SO_ERROR) // pack('i', 0)) == ECONNREFUSED) { ($lost, $knocked) = (1, 0); return 0 }
         send($knocker, $knock, 0);
@@ -594,8 +821,8 @@ sub once {
         my $started = time;
         # bound by hand: IO::Socket::INET binds no port 0, and then each try would go from another port. A local port that cannot
         # be bound: a new one, with its knock
-        my $tcp = IO::Socket::INET->new;
-        socket($tcp, PF_INET, SOCK_STREAM, IPPROTO_TCP) && setsockopt($tcp, SOL_SOCKET, SO_REUSEADDR, 1)
+        my $tcp = $trying = IO::Socket::INET->new;
+        socket($tcp, PF_INET, SOCK_STREAM, IPPROTO_TCP) && reuse($tcp)
             && bind($tcp, pack_sockaddr_in($from, INADDR_ANY)) or do { say('❌', 'bad', "TCP: $!"); ($from, $knocked) = (0, 0); sleep 1; next };
         $from = (unpack_sockaddr_in(getsockname($tcp)))[0];
         $tcp->blocking(0);
@@ -652,11 +879,95 @@ sub meeting {
 }
 
 # A connection that met, joined to the service till both sides end: each end told the other.
+# ── passing the bytes ──
+
+# splice(2) of Linux: the bytes go from one socket into a pipe and from the pipe into the other socket inside the kernel - they
+# never enter this process, nothing copies them here. Its number of the system call is of the processor and the ABI perl was
+# built for, as the kernel has it: unknown - another processor, or macOS, which has no splice - none, and the bytes go through
+# one buffer. A wrong number would call another system call: only those known are used
+my $SPLICE = do {
+    my ($arch, $wide) = ($Config{archname} // '', ($Config{ptrsize} // 4) == 8);
+    $^O ne 'linux' ? undef
+        : $arch =~ /^x86_64/ ? ($wide ? 275 : undef)
+        : $arch =~ /^i[3-6]86/ ? 313
+        : $arch =~ /^(aarch64|arm64)/ ? 76
+        : $arch =~ /^arm/ ? 340
+        : $arch =~ /^mips64/ ? ($wide ? 5263 : 6267)
+        : $arch =~ /^mips/ ? 4304
+        : $arch =~ /^riscv64/ ? 76
+        : $arch =~ /^(powerpc|ppc)/ ? 283
+        : $arch =~ /^s390x/ ? 306
+        : undef;
+};
+
+# One way by splice: socket, pipe, socket, till `from` ends. The pipe made 1 MB where the system lets it ( F_SETPIPE_SZ ), 64 KB
+# else: fewer calls for the same bytes. SPLICE_F_MOVE only - not SPLICE_F_MORE, which holds back a short last piece: a key
+# pressed in ssh would wait for it. undef - splice cannot here, nothing moved: the buffer then
+sub by_splice {
+    my ($from, $to) = @_;
+    defined $SPLICE && pipe(my $r, my $w) or return undef;
+    fcntl($w, 1031, 1 << 20);
+    my $size = fcntl($w, 1032, 0) || 65536;
+    my ($in, $out, $pr, $pw) = map { fileno $_ } $from, $to, $r, $w;
+    my $moved = 0;
+    while (1) {
+        my $n = syscall($SPLICE, $in, 0, $pw, 0, $size, 1);
+        return $moved || ($! != EINVAL && $! != ENOSYS) ? 1 : undef if $n < 0;
+        return 1 if $n == 0;
+        $moved = 1;
+        while ($n > 0) {
+            my $m = syscall($SPLICE, $pr, 0, $out, 0, $n, 1);
+            return 1 if $m <= 0;
+            $n -= $m;
+        }
+    }
+}
+
+# One way through one buffer, allocated once: sysread fills it in place, syswrite sends that very buffer from an offset till all
+# of it is gone - no piece of the bytes copied into another string, nothing allocated per read
+sub by_copy {
+    my ($from, $to) = @_;
+    my $size = 262144;
+    my $buf = "\0" x $size;
+    while (my $n = sysread($from, $buf, $size)) {
+        for (my $off = 0; $off < $n;) {
+            my $w = syswrite($to, $buf, $n - $off, $off) // return;
+            $off += $w;
+        }
+    }
+}
+
+# Both ways at once, each in a process of its own - a blocking way each, so one that waits for its other end to take the bytes
+# holds nothing of the other. A way that ends ends the sending of its other end only: a program that sends, ends its sending and
+# waits for the answer gets it. The buffers of the sockets are left to the system: Linux, macOS and Windows grow them as the
+# connection needs - to megabytes on a far one -, and a size set by a program turns that off, on Linux below the limit the system
+# sets programs ( net.core.rmem_max, 208 KB by default )
+sub pass_both {
+    my ($a, $b) = @_;
+    my $pid = fork;
+    return say('❌', 'bad', "fork: $!") unless defined $pid;
+    my ($from, $to) = $pid ? ($b, $a) : ($a, $b);
+    by_splice($from, $to) // by_copy($from, $to);
+    shutdown($to, 1);
+    exit 0 unless $pid;
+    waitpid($pid, 0);
+}
+
+# With a token, the connection begins with it - 16 bytes within 10 s -, or is cut off: a program that dials the port of meeting
+# itself, a guesser, a way of the client other than the one it kept. `way`: how it came, through the relay or directly
 sub join_to {
-    my ($came) = @_;
+    my ($came, $way) = @_;
+    if (defined $TOKEN) {
+        my ($got, $end, $sel) = ('', time + 10, IO::Select->new($came));
+        while (length $got < 16 && (my $left = $end - time) > 0) {
+            $sel->can_read($left) or last;
+            sysread($came, $got, 16 - length $got, length $got) or last;
+        }
+        return say('🚫', 'warn', "Someone came $way without the token: cut off") if $got ne $TOKEN;
+    }
     my $there = IO::Socket::INET->new(PeerAddr => $forward, Proto => 'tcp', Timeout => 5)
         or return say('❌', 'bad', "Someone came; $forward: $!");
-    say('✅', 'good', "Someone came: joined to $forward");
+    say('✅', 'good', defined $TOKEN ? "Someone came $way: joined to $forward" : "Someone came: joined to $forward");
     setsockopt($_, IPPROTO_TCP, TCP_NODELAY, 1) for $came, $there;
     # Keepalive on the connection that met: after 60 s of silence, a probe each 10 s, 6 of them. A client that is gone without a
     # word - a laptop closed - is found, and its connection to the service ended; and a session that is silent stays known to
@@ -664,25 +975,26 @@ sub join_to {
     setsockopt($came, SOL_SOCKET, SO_KEEPALIVE, 1);
     if ($^O eq 'linux') { setsockopt($came, IPPROTO_TCP, $_->[0], $_->[1]) for [4, 60], [5, 10], [6, 6] } # TCP_KEEPIDLE, _KEEPINTVL, _KEEPCNT
     elsif ($^O eq 'darwin') { setsockopt($came, IPPROTO_TCP, 0x10, 60) } # TCP_KEEPALIVE, seconds of silence
-    my %other = (fileno($came) => $there, fileno($there) => $came);
-    my $sel = IO::Select->new($came, $there);
-    while ($sel->count) {
-        for my $s ($sel->can_read) {
-            my $n = sysread($s, my $buf, 65536);
-            if (!$n) {
-                $sel->remove($s);
-                shutdown($other{fileno $s}, 1);
-                next;
-            }
-            my $out = $other{fileno $s};
-            for (my $off = 0; $off < $n;) {
-                my $w = syswrite($out, $buf, $n - $off, $off);
-                unless (defined $w) { $sel->remove($s); last }
-                $off += $w;
-            }
-        }
-    }
+    pass_both($came, $there);
     say('👋', 'quiet', 'Gone, the one who came');
+}
+
+# A connection that met, joined to the service in a process of its own. The process keeps no other socket open: one it kept would
+# live on after this one closed it - a try of dialing the relay would meet a client nobody serves
+sub serve {
+    my ($came, $way) = @_;
+    if ($live >= $MAX) { say('⚠️', 'warn', "$MAX connections are joined already: one more turned away"); close $came; return }
+    my $pid = fork;
+    if (!defined $pid) { say('❌', 'bad', "fork: $!"); close $came; return }
+    if ($pid == 0) {
+        for ($udp, $knocker, $trying, map({ $_->{sock} } @old, @targets)) { close $_ if $_ && $_ != $came }
+        join_to($came, $way);
+        exit 0;
+    }
+    $live++;
+    # how many are joined now, of those there may be: said from the second on
+    say('👥', 'quiet', "$live of $MAX connections joined now") if $live > 1;
+    close $came;
 }
 
 # the port of meeting is not sure at the address of now: asked again at the next look. And every REBIND minutes anyway: a relay that
@@ -697,14 +1009,7 @@ while (1) {
     my $came = once(pack_sockaddr_in($port, $at->[0]), $look);
     if ($came) {
         $from = 0;
-        if ($live >= $MAX) { say('⚠️', 'warn', "$MAX connections are joined already: one more turned away"); close $came; next }
-        my $pid = fork;
-        if (!defined $pid) { say('❌', 'bad', "fork: $!"); close $came; next }
-        if ($pid == 0) { close $udp; close $knocker if $knocker; join_to($came); exit 0 }
-        $live++;
-        # how many are joined now, of those there may be: said from the second on
-        say('👥', 'quiet', "$live of $MAX connections joined now") if $live > 1;
-        close $came;
+        serve($came, 'through the relay');
         next;
     }
     # every 30 s, at the end of the try then: where the relay is now - a dynamic address moves; its name looked up again, or its
