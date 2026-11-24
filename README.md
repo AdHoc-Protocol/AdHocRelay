@@ -32,6 +32,8 @@ through a port forwarded on it. [How much a router carries](#how-much-a-router-c
   [AdHoc Relay Client](#adhoc-relay-client), a small script of this project, beside its program.
 - **Only the one with the key waits at a port:** the key is never sent; a stranger never stands in for the server.
 - **The address of the relay may change:** another relay keeps it. No DNS, no service of anyone else.
+- **Not for WebRTC:** it joins TCP, and the voice and the video of WebRTC go over UDP. For WebRTC, install `coturn`:
+  [What meets](#what-meets).
 
 Two computers at two homes cannot connect to each other directly: each sits behind a NAT, its home router, and a NAT lets
 nothing in that its own computer did not ask for. AdHoc Relay connects them through a **relay** both can reach: an
@@ -1190,7 +1192,7 @@ A client whose call is refused calls again from another local port: the call bef
 let through once the first is gone. A kernel without timeouts of conntrack keeps a call 30 s; the log says so: `no timeouts of
 conntrack in this kernel`. Calls of one address: 10 a second at most, apart from the requests and STUN.
 ✓ The browser has neither raw UDP nor dialing of TCP both ways: a page meets through the relay, and may go on over WebRTC, with the
-STUN of the relay.
+STUN of the relay - and with a TURN server, not the relay, when the two cannot punch their NATs: [Not WebRTC](#what-meets).
 ✓ A program in a container of a bridge network - as Docker runs one unless told otherwise - meets through the relay every time,
 ~2.5 s later than it would: it sees itself at the address of the bridge, `172.17.0.x`, `172.18.0.x`, and has no IPv6, so it tells
 the other side addresses nobody outside its own computer can dial, and the SYN of the other side finds nothing there. Measured: a
@@ -1595,6 +1597,13 @@ of a kernel, which sees addresses and ports and never a byte of the data.
   of meeting, the only one its NAT lets in -: a service of UDP, one socket for all its clients, could not tell them apart.
   Two programs of UDP punch their NATs themselves - it works more often for UDP than for TCP -, and may learn where they are
   from the STUN of the relay. The requests, the knocks and the calls of the relay itself are UDP.
+- **Not WebRTC.** AdHoc Relay is no replacement for WebRTC: the voice and the video of WebRTC go over UDP, and a browser can
+  neither bind a port nor knock. Two browsers that punch their NATs themselves need only STUN, and the relay answers it -
+  `stun:relay:40000`; when they cannot, WebRTC needs a TURN server. Where it is WebRTC that is needed, install the package
+  `coturn` - `apk add coturn` on an OpenWrt router, `apt install coturn` on a Linux computer -, beside the relay or in its
+  place. It is a program that receives every byte and sends it again, as a proxy does: on a weak router it carries less, at
+  more cost - [the proxies](#tldr). Its ports - 3478, and 49152-65535 for what it carries, unless told otherwise - are
+  outside the range of the relay, 40000-49999 by default.
 - **IPv4.** A relay is for NAT, and NAT is of IPv4. Two computers with IPv6 have no NAT between them - the firewalls of their
   routers let in what answers their own SYNs -, and dial each other directly: the call passes their IPv6 addresses. The kernel
   does not join a connection of IPv4 with one of IPv6, so a relay of IPv6 would serve only those who need it least; and a
