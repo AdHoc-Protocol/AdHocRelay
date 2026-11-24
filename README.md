@@ -149,7 +149,7 @@ Dart and Python: the waiting with a token and the meeting of the client, for TCP
 | [AdHoc Relay Client](#adhoc-relay-client) | Remote Desktop, ssh, a WebSocket client, a browser: directly when the two can, through the relay else - a small script beside the program |
 | [In your own program](#in-your-own-program) | The server |
 | [API](#api) | `adhoc-relay api get \| set`: the same JSON on a router and on a Linux computer, for a program that sets relays up over SSH |
-| [Safety](#safety), [Why nothing is encrypted](#why-nothing-is-encrypted), [When something goes wrong](#when-something-goes-wrong), [Limits](#limits) | |
+| [Safety](#safety), [Why nothing is encrypted](#why-nothing-is-encrypted), [When something goes wrong](#when-something-goes-wrong), [By its nature](#by-its-nature) | |
 | [Folders](#folders) | What is where; the pictures of this page |
 
 ## Quick start
@@ -1191,6 +1191,13 @@ let through once the first is gone. A kernel without timeouts of conntrack keeps
 conntrack in this kernel`. Calls of one address: 10 a second at most, apart from the requests and STUN.
 ✓ The browser has neither raw UDP nor dialing of TCP both ways: a page meets through the relay, and may go on over WebRTC, with the
 STUN of the relay.
+✓ A program in a container of a bridge network - as Docker runs one unless told otherwise - meets through the relay every time,
+~2.5 s later than it would: it sees itself at the address of the bridge, `172.17.0.x`, `172.18.0.x`, and has no IPv6, so it tells
+the other side addresses nobody outside its own computer can dial, and the SYN of the other side finds nothing there. Measured: a
+client in a bridge network met its server in the same LAN through the relay, 3 times of 3, in 2.6 s; the same client in the
+network of its computer met it directly, over IPv6 and in the LAN, in 0.1-0.3 s. A server in such a container answers with the
+same addresses: the same holds for it. The way: the network of the computer for the program that meets - `network_mode: host`,
+`docker run --network host` -, or a program of the computer that meets for it.
 
 ## AdHoc Relay Client
 
@@ -1554,7 +1561,7 @@ who, and the secrecy of what the two say, stays with them.
 |:--|:--|:--|
 | The client cannot connect at all | The port is closed: the server does not knock at it - it holds it, waiting for a yes of its person, or it is not running, or it sleeps -, or the client dials a port of an earlier start of the server | Let the server knock: its program runs, and the computer does not sleep. Take the port the server shows now |
 | The server gets no port | A wrong password or key, a wrong first port - the line of a fixed port names the first port of the relay too, not the fixed one -, `give` not running, or the address of the server is blocked | Check the password or the key, and the port the server asks: the first of the range; on a router `logread -e adhoc-relay`, on a Linux computer `systemctl status adhoc-relay` |
-| The server has its port and knocks, and still the port stays closed | The address of the server is blocked: someone at the same address asked wrong too often, or the server used an old password. Or its knocks leave from another public address than its request for the port: its NAT has several, see [Limits](#limits). Or it knocks with another id, or for another address, than it bound with | Wait for the block to end (10 minutes by default); bind, hold and knock with one id, and with the address the relay answered |
+| The server has its port and knocks, and still the port stays closed | The address of the server is blocked: someone at the same address asked wrong too often, or the server used an old password. Or its knocks leave from another public address than its request for the port: its NAT has several, see [By its nature](#by-its-nature). Or it knocks with another id, or for another address, than it bound with | Wait for the block to end (10 minutes by default); bind, hold and knock with one id, and with the address the relay answered |
 | A server at a fixed port: the client cannot connect | The server asks with another key - an old line -, or the port is not fixed in the settings: it gets no port | Copy the line from the page again: **Ports > The last 10 minutes**, turned on, shows a request with the key as **Asked for a port**, one with a wrong key as **Wrong password or key** |
 | The server says the relay does not answer the read | S is down, its read key is deleted, or D has never written: S does not list D as written | On D, **Changing IP > On my public IP change, notify the following relays**: did S answer? On S, **Changing IP > Track the public IP of other relays**: when did D write? |
 | **Changing IP > On my public IP change, notify the following relays** on D: never answered | A wrong write key, or the line of S of another record; S blocked D for wrong keys; S unreachable | Copy the line of S again: **Copy** in its row of **Changing IP > Track the public IP of other relays** on its page, or `adhoc-relay lines` there |
@@ -1575,61 +1582,93 @@ who, and the secrecy of what the two say, stays with them.
 | The script of the server says `Someone came through the relay without the token: cut off` | A program dials the line itself, or someone tries the port: with a token only AdHoc Relay Client gets in | The client runs the utility, and its program dials it; or the server waits without a token |
 | A WebSocket client, through the utility: the server refuses it, or TLS fails | The client sends `Host: 127.0.0.1:<port>`, and `wss://` checks the certificate by 127.0.0.1 | The server takes that name too; for TLS the client is given the real name of the server, or `ws://` with encryption inside. See [AdHoc Relay Client](#adhoc-relay-client) |
 
-## Limits
+## By its nature
 
-- IPv4 only.
-- The server must accept two connections meeting. Linux does, and Windows 11 with its firewall on: its firewall takes the SYN
+Nothing here is a fault waiting for a fix. Each follows from what the relay is: the meeting of two TCP connections in the NAT
+of a kernel, which sees addresses and ports and never a byte of the data.
+
+### What meets
+
+- **TCP.** The meeting is the simultaneous open of TCP: the SYN of the server is dropped at the relay and remembered, the SYN
+  of a client is sent to it as from the relay, and the system of the server makes one connection of the two. UDP has no SYN
+  to remember and no end of a connection; and every client of a server would come to it from one address and port - the port
+  of meeting, the only one its NAT lets in -: a service of UDP, one socket for all its clients, could not tell them apart.
+  Two programs of UDP punch their NATs themselves - it works more often for UDP than for TCP -, and may learn where they are
+  from the STUN of the relay. The requests, the knocks and the calls of the relay itself are UDP.
+- **IPv4.** A relay is for NAT, and NAT is of IPv4. Two computers with IPv6 have no NAT between them - the firewalls of their
+  routers let in what answers their own SYNs -, and dial each other directly: the call passes their IPv6 addresses. The kernel
+  does not join a connection of IPv4 with one of IPv6, so a relay of IPv6 would serve only those who need it least; and a
+  block by address means nothing where each home has a /64 of addresses to send from.
+- **The server accepts two connections meeting.** Linux does, and Windows 11 with its firewall on: its firewall takes the SYN
   that comes for its own dialing socket as part of that connection.
-- A server waits at a port of its own: the range has 9999 by default, and no more servers wait at once than it has ports.
-  How many a relay carries is of its memory and its processor, not of the range: each waiting server keeps a few records, sends
-  a few SYNs a try of dialing and a knock now and then, which the kernel checks, and binds again - the script `give` adds its
-  key of knocks to the rules. The [times of the servers](#the-times-of-the-servers) set how often; [How much a router
+- **Directly, or through the relay.** Directly: over IPv6 when both have it, in their LAN when both are behind one NAT, at their
+  public addresses when both NATs keep the local port; the relay carries the rest. Directly meet two programs that do the
+  direct way: programs of their own, or a script of the server with a token and the [AdHoc Relay Client](#adhoc-relay-client).
+  A client that only dials - Remote Desktop Connection, ssh, a browser - meets through the relay, unless the utility dials
+  for it.
+- **One call at a time.** The calls to one server go back one way - from the port of meeting to the port the server dials
+  from -, and conntrack keeps one connection of a way: AdHoc Relay Client calls once a connection, connections opened at once
+  meet one after another, about 2 s apart, and those that wait 6 s go through the relay.
+
+### Whom the relay knows
+
+- **By the address it sees.** The key of the knocks is of the public address of the server - a knock caught on the wire is of
+  no use from another address -: its request for a port and its knocks must reach the relay from one address. A NAT that
+  sends them out from different public addresses - a pool of them, not paired to the computer behind it - cannot hold a
+  port: the knock is refused, the server binds again, and so on.
+- **By the address and the port, or by the address alone.** A server is known by its address and the port it knocks and dials
+  from, when its NAT keeps that port - most do. Behind a NAT that changes the source ports it is known by its address alone:
+  a client behind the same NAT that dials while nobody waits stands in its place, and meets the server at its next try all
+  the same. Two servers of one fixed port behind such a NAT, of one public address, with keys of two users: by the address
+  alone the relay cannot tell them, and a meeting there is of the user whose server knocked last - its count, its limit,
+  its direct path only.
+- **The block is by address.** Computers that share one public address with someone who guesses passwords are blocked with
+  them - as clients: a server waiting at a port waits on.
+- **The server in the LAN of the relay** uses the same line: it asks at the public address, and `give` answers from that
+  address, not from the one of the LAN. On Linux, `give` learns the addresses of the computer at its start and at
+  `systemctl reload adhoc-relay`; one added later is answered from the address the kernel picks.
+
+### How many
+
+- **A port a waiting server.** The range has 9999 by default, and no more servers wait at once than it has ports; `give` finds
+  a free port while there is one - a few picks at random, then, the range nearly full, by the list of the ports given. A port
+  is asked and the rules are loaded under one lock: a load - Save & Apply - loses no port given in its moment. How many a
+  relay carries is of its memory and its processor, not of the range: each waiting server keeps a few records, sends a few
+  SYNs a try of dialing and a knock now and then, which the kernel checks, and binds again - `give` adds its key of knocks
+  to the rules. The [times of the servers](#the-times-of-the-servers) set how often; [How much a router
   carries](#how-much-a-router-carries) has the numbers of a small one.
-- The memory a flood can take is bounded. The sets anyone can fill by sending packets from made-up addresses - who asked, who
+- **A flood takes bounded memory.** The sets anyone can fill by sending packets from made-up addresses - who asked, who
   knocked wrong, who is blocked, who guesses - have a size by the memory of the relay: full, all of them take about 6 MB of
   the kernel on a router of 64 MB, 13 MB with 128 MB, 26 MB with 256 MB, some 50 MB on a computer with more. A set that is
   full notes no new address until its old ones end, a minute for most: requests from addresses not noted are dropped
   meanwhile. The servers that hold their ports knock on, and bind again as always: an address whose knock the kernel has
   checked asks among the servers, counted apart, and no made-up address gets among them. A server that starts while such a
   flood lasts gets its port when the flood is over.
-- The key of the knocks is of the public address of the server: its request for a port and its knocks must reach the relay
-  from one address. A NAT that sends them out from different public addresses - a pool of them, not paired to the computer
-  behind it - cannot hold a port: the knock is refused, the server binds again, and so on.
-- The server may be in the LAN of the relay itself, and use the same line: it asks at the public address, and `give`
-  answers from that address, not from the one of the LAN. On Linux, `give` learns the addresses of the computer at its start and
-  at `systemctl reload adhoc-relay`; one added later is answered from the address the kernel picks.
-- The block is by address: computers that share one public address with someone who guesses passwords are blocked with them -
-  as clients: a server waiting at a port waits on.
-- A server is known by its address and the port it knocks and dials from, when its NAT keeps that port - most do. Behind a NAT
-  that changes the source ports it is known by its address alone: a client behind the same NAT that dials while nobody waits
-  stands in its place, and meets the server at its next try all the same. Two servers of one fixed port behind such a NAT, of
-  one public address, with keys of two users: by the address alone the relay cannot tell them, and a meeting there is of the
-  user whose server knocked last - its count, its limit, its direct path only.
-- As many servers as ports: `give` finds a free port while there is one - a few picks at random, then, the range nearly full, by
-  the list of the ports given. A port is asked and the rules are loaded under one lock: a load - Save & Apply - loses no port
-  given in its moment.
-- The guard counts only the connections the client ends: the service of the server ending it first, the client ends it a moment later, and that is
-  counted. Its byte count is not looked at: a connection of a few seconds that sent megabytes counts as short.
-- The limit of a user is a guard against overuse, not a meter to bill by: with Software flow offloading of the firewall on it
-  does not hold; a router that loses its power loses up to an hour of what was counted; a meeting that began before the limit
-  was set goes on uncounted.
-- The relay marks the connections it carries in the kernel: the bits 0x1fff0000 of the connection mark, `ct mark`. Another
-  program of the same computer that sets these bits on its own connections - a VPN, a policy of routing - clashes with it:
-  such a connection is taken for one of the relay, and dropped. Through the firewall the relay lets only what it sent on itself
-  - marked, and with its destination changed.
-- The records are kept in memory, `/tmp/adhoc-relay` on a router and `/run/adhoc-relay` on a Linux computer: a restart of `give`
-  keeps them, a restart of S does not - D writes again within 60 seconds.
-- The client's line follows D's address: it changes when the address does, and the server shows the new one. Only a name in DNS
-  would keep it the same.
-- D behind the NAT of its provider: S sees, and keeps, the address of that NAT. The range must be forwarded to D there, as for any
-  relay behind a NAT.
-- Directly: over IPv6 when both have it, in their LAN when both are behind one NAT, at their public addresses when both NATs keep
-  the local port; the relay carries the rest. The relay itself speaks IPv4 only: the IPv6 addresses are only passed in the call.
-- A meeting directly is of two programs that do the direct way: programs of their own, or a script of the server with a token
-  and the [AdHoc Relay Client](#adhoc-relay-client). A client that only dials - Remote Desktop Connection, ssh, a browser - meets
-  through the relay, unless the utility dials for it.
-- AdHoc Relay Client calls once a connection: connections opened at once meet one after another, about 2 s apart, and those
-  that wait 6 s go through the relay.
+
+### What it counts
+
+- **The guard sees the ends, not the bytes.** It counts only the connections the client ends: the service of the server
+  ending it first, the client ends it a moment later, and that is counted. The data of a meeting passes the kernel without
+  the rules looking at it: a connection of a few seconds that sent megabytes counts as short.
+- **The limit of a user is a guard against overuse, not a meter to bill by.** With Software flow offloading of the firewall on
+  the packets pass by the rules, and it does not hold; the count is kept in memory and saved each hour, so a router that
+  loses its power loses up to an hour of it; a meeting that began before the limit was set goes on uncounted.
+
+### Records
+
+- **Kept in memory,** `/tmp/adhoc-relay` on a router and `/run/adhoc-relay` on a Linux computer: a restart of `give` keeps
+  them, a restart of S does not - D writes again within 60 seconds.
+- **The client's line follows D's address:** it changes when the address does, and the server shows the new one. Only a name
+  in DNS would keep it the same, and AdHoc Relay needs no service of anyone else.
+- **D behind the NAT of its provider:** S sees, and keeps, the address of that NAT. The range must be forwarded to D there, as
+  for any relay behind a NAT.
+
+### The kernel it shares
+
+- **The mark of a connection.** The relay marks the connections it carries in the kernel: the bits 0x1fff0000 of the
+  connection mark, `ct mark`. Another program of the same computer that sets these bits on its own connections - a VPN, a
+  policy of routing - clashes with it: such a connection is taken for one of the relay, and dropped. Through the firewall
+  the relay lets only what it sent on itself - marked, and with its destination changed.
 
 ## Folders
 
